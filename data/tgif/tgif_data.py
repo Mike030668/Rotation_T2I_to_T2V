@@ -137,7 +137,7 @@ class TakeTgif():
 
                     else:
                         if bad_movi:
-                            print(f'\rMovi {id_movi} have static frames')
+                            print(f"\rMovi {id_movi} have static frames\n")
 
 
                     if not bad_movi and not low_movi:
@@ -153,7 +153,7 @@ class TakeTgif():
 
                     if select_movis >= wait_movis: break
 
-                if id_matchs and not len(pil_df) % save_each:
+                if len(pil_df) and not len(pil_df) % save_each:
                     df = pd.DataFrame(pil_df)
                     df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
                     df.to_csv(file_path, index=False)
