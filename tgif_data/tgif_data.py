@@ -1,7 +1,6 @@
 import requests
 import numpy as np
 import pandas as pd
-import random
 import os
 import PIL
 
@@ -17,7 +16,8 @@ class TakeTgif():
 
     def __init__(self,
                  tsv_path: str,
-                 txt_path: str):
+                 txt_path: str
+                 ):
         
         super(TakeTgif, self).__init__()
         
