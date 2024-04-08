@@ -106,20 +106,20 @@ class TakeTgif():
                     frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)]
                     width, height = frames[0].size
                 except:
-                    print(f'Non or bad gif')
+                    print(f'\rNon or bad gif')
                     error = 1
                     frames = []
                     width, height = 0, 0
 
                 if len(frames) < self._take_min:
                     if error == 1: error = 0
-                    else: print(f'Small gif {id_movi}')
+                    else: print(f'\rSmall gif {id_movi}')
 
                 # select movi not shot than take_min
                 else:
                     # select movi not low than MIN_SIZE
                     if width < self._min_size  or  height < self._min_size:
-                        print(f'Movi {id_movi} have low H or W')
+                        print(f'\rMovi {id_movi} have low H or W')
                         low_movi = 1
 
                     if len(frames) > self.take_max and not low_movi:
@@ -133,11 +133,11 @@ class TakeTgif():
 
                         if not bad_movi:
                             frames = frames[:self.take_max]
-                            print(f'Cut movi {id_movi}')
+                            print(f'\rCut movi {id_movi}')
 
                     else:
                         if bad_movi:
-                            print(f'Movi {id_movi} have static frames')
+                            print(f'\rMovi {id_movi} have static frames\n')
 
 
                     if not bad_movi and not low_movi:
@@ -149,9 +149,9 @@ class TakeTgif():
                             pil_df.append([id_movi, f"{width},{height}", id_frame, [width, height], caption, img_path, self.patterns_to_search])
 
                         select_movis += 1
-                        print(f'Movi {id_movi} have len = {len(frames)} take all move with W_{width} x H_{height} selected_{select_movis}')
+                        print(f"\rMovi {id_movi} have len = {len(frames)} take all move with W_{width} x H_{height} selected_{select_movis}\n")
 
-                    if select_movis > wait_movis: break
+                    if select_movis >= wait_movis: break
 
             pil_df = pd.DataFrame(pil_df)
             pil_df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
