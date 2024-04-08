@@ -36,7 +36,9 @@ class TakeTgif():
 
         
         """
-        if patterns_to_search == 'random':
+        self.patterns_to_search = patterns_to_search
+
+        if self.patterns_to_search == 'random':
             if qty:
                rand_gif_df = self.train_df.sample(qty)
             else:
@@ -45,8 +47,8 @@ class TakeTgif():
             self.train_vidxs, self.train_corpus = list(rand_gif_df.index.values), list(rand_gif_df[1])
             self.matchs = [(id, text) for id, text in zip(self.train_vidxs, self.train_corpus)]
 
-        elif type(patterns_to_search) == list :
-            self.matchs = [(self.train_vidxs[i], s) for (i, s) in enumerate(self.train_corpus) if all([(p in s) for p in patterns_to_search])]
+        elif type(self.patterns_to_search) == list :
+            self.matchs = [(self.train_vidxs[i], s) for (i, s) in enumerate(self.train_corpus) if all([(p in s) for p in self.patterns_to_search])]
 
     def seacher(
             self,
@@ -82,8 +84,8 @@ class TakeTgif():
 
             select_movis = 0
             pil_df = []
-            dif_frames =[]
-            
+            dif_frames = np.array([])
+
             for id_matchs in range(len(self.matchs)):
                 bad_movi = 0
                 low_movi = 0
