@@ -109,6 +109,7 @@ class TakeTgif():
                     print(f'Non or bad gif')
                     error = 1
                     frames = []
+                    width, height = 0, 0
 
                 if len(frames) < self._take_min:
                     if error == 1: error = 0
@@ -126,12 +127,13 @@ class TakeTgif():
                         dif_frames = [(frame - np.array(frames[0])) for frame in frames[1:]]
                         dif_frames = np.array(dif_frames)
 
-                    for k in range(dif_frames.shape[0]):
-                        if dif_frames[k].sum() == 0:
-                            bad_movi+=1
-                    if not bad_movi:
-                        frames = frames[:self.take_max]
-                        print(f'Cut movi {id_movi}')
+                        for k in range(dif_frames.shape[0]):
+                            if dif_frames[k].sum() == 0:
+                                bad_movi+=1
+
+                        if not bad_movi:
+                            frames = frames[:self.take_max]
+                            print(f'Cut movi {id_movi}')
 
                     else:
                         if bad_movi:
