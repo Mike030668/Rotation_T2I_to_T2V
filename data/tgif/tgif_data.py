@@ -153,7 +153,7 @@ class TakeTgif():
 
                     if select_movis >= wait_movis: break
 
-                if not len(pil_df) % save_each:
+                if id_matchs and not len(pil_df) % save_each:
                     df = pd.DataFrame(pil_df)
                     df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
                     df.to_csv(file_path, index=False)
