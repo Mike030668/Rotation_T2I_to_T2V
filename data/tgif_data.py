@@ -25,7 +25,7 @@ class TakeTgif():
         with open(txt_path) as f:
             self.train_vids = [l.strip() for l in f.readlines()]  # urls
             self.train_df = self.gif_df[self.gif_df[0].isin(self.train_vids)]
-            #self.train_vidxs, self.train_corpus = list(self.train_df.index.values), list(self.train_df[1])
+            self.train_vidxs, self.train_corpus = list(self.train_df.index.values), list(self.train_df[1])
 
     def selector(self,
                  qty = 1000,
