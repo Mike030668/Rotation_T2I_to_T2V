@@ -106,20 +106,20 @@ class TakeTgif():
                     frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)]
                     width, height = frames[0].size
                 except:
-                    print(f'\rNon or bad gif')
+                    print(f"\rNon or bad gif", end="")
                     error = 1
                     frames = []
                     width, height = 0, 0
 
                 if len(frames) < self._take_min:
                     if error == 1: error = 0
-                    else: print(f'\rSmall gif {id_movi}')
+                    else: print(f"\rSmall gif {id_movi}", end="")
 
                 # select movi not shot than take_min
                 else:
                     # select movi not low than MIN_SIZE
                     if width < self._min_size  or  height < self._min_size:
-                        print(f'\rMovi {id_movi} have low H or W')
+                        print(f'\rMovi {id_movi} have low H or W', end="")
                         low_movi = 1
 
                     if len(frames) > self.take_max and not low_movi:
@@ -133,7 +133,7 @@ class TakeTgif():
 
                         if not bad_movi:
                             frames = frames[:self.take_max]
-                            print(f'\rCut movi {id_movi}')
+                            print(f'\rCut movi {id_movi}', end="")
 
                     else:
                         if bad_movi:
