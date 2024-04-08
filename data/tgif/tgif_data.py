@@ -58,7 +58,7 @@ class TakeTgif():
             wait_movis : int,
             file_path : str,
             path_tmp = '/content',
-
+            save_each = 10
             ):
 
             """
@@ -137,7 +137,7 @@ class TakeTgif():
 
                     else:
                         if bad_movi:
-                            print(f'\rMovi {id_movi} have static frames\n')
+                            print(f'\rMovi {id_movi} have static frames')
 
 
                     if not bad_movi and not low_movi:
@@ -153,6 +153,11 @@ class TakeTgif():
 
                     if select_movis >= wait_movis: break
 
-            pil_df = pd.DataFrame(pil_df)
-            pil_df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
-            pil_df.to_csv(file_path, index=False)
+                if not len(pil_df) % save_each:
+                    df = pd.DataFrame(pil_df)
+                    df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
+                    df.to_csv(file_path, index=False)
+
+            df = pd.DataFrame(pil_df)
+            df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
+            df.to_csv(file_path, index=False)
