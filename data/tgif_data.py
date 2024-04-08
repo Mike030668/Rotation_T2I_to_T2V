@@ -1,6 +1,7 @@
 import requests
 import numpy as np
 import pandas as pd
+import random
 import os
 import PIL
 
@@ -28,7 +29,7 @@ class TakeTgif():
             self.train_vidxs, self.train_corpus = list(self.train_df.index.values), list(self.train_df[1])
 
     def selector(self,
-                 qty = 1000,
+                 qty = None,
                  patterns_to_search = 'random',                     
         ):
         """
@@ -36,19 +37,22 @@ class TakeTgif():
         
         """
         if patterns_to_search == 'random':
-            rand_gif_df = self.train_df.sample(qty)
+            if qty:
+               rand_gif_df = self.train_df.sample(qty)
+            else:
+               rand_gif_df = self.train_df
+
             self.train_vidxs, self.train_corpus = list(rand_gif_df.index.values), list(rand_gif_df[1])
             self.matchs = [(id, text) for id, text in zip(self.train_vidxs, self.train_corpus)]
 
         elif type(patterns_to_search) == list :
             self.matchs = [(self.train_vidxs[i], s) for (i, s) in enumerate(self.train_corpus) if all([(p in s) for p in patterns_to_search])]
-    
 
     def seacher(
             self,
             min_size : int,
             take_min : int,
-            take_max : int,
+            wait_len : int,
             wait_movis : int,
             file_path : str,
             path_tmp = '/content',
@@ -68,7 +72,7 @@ class TakeTgif():
 
             self._min_size = min_size
             self._take_min = take_min
-            self.take_max = take_max
+            self.take_max = wait_len + 1
 
             path_gif = path_tmp + '/temp.gif' # save path tempory
 
