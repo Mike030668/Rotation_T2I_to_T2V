@@ -82,6 +82,8 @@ class TakeTgif():
 
             select_movis = 0
             pil_df = []
+            dif_frames =[]
+            
             for id_matchs in range(len(self.matchs)):
                 bad_movi = 0
                 low_movi = 0
@@ -104,7 +106,7 @@ class TakeTgif():
                 except:
                     print(f'Non or bad gif')
                     error = 1
-                    frame = []
+                    frames = []
 
                 if len(frames) < self._take_min:
                     if error == 1: error = 0
