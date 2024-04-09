@@ -200,6 +200,6 @@ class TakeTgif():
             for id_frame in range(len_movi):
                 img_path = os.path.join(dir_name, f'{id_movi}_{id_frame}.jpg')
                 frames[id_frame].save(img_path)
-                print(f"\rMovi {id_movi} have len = {len_movi} saved_{saved_movis}\n")
-            
+
+            print(f"\rMovi {id_movi} have len = {len_movi} saved_{saved_movis}\n")
             saved_movis+=1
