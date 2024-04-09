@@ -191,11 +191,10 @@ class TakeTgif():
 
             # open gif
             gif_img = PIL.Image.open(path_gif)
+            # take original frames
+            frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)][:len_movi]
             
             # save frames and make
-            for i in range(len(frames)):
-                # take original frames
-                id_frame = i
-                frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)][:len_movi]
+            for id_frame in range(len(frames)):
                 img_path = os.path.join(dir_name, f'{id_movi}_{id_frame}.jpg')
                 frames[i].save(img_path)
