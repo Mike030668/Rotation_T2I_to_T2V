@@ -58,7 +58,8 @@ class TakeTgif():
             wait_movis : int,
             file_path : str,
             path_tmp = '/content',
-            save_each = 10
+            save_each = 10,
+            dir_image = ''
             ):
 
             """
@@ -77,10 +78,11 @@ class TakeTgif():
             self.take_max = wait_len + 1
 
             path_gif = path_tmp + '/temp.gif' # save path tempory
-
-            dir_name = path_tmp + '/images'   # save path tempory
-            try: os.mkdir(dir_name)
-            except: pass
+            
+            #if len(dir_image):
+            #   dir_name = dir_image + '/images'   # save path tempory
+            #    try: os.mkdir(dir_name)
+            #    except: pass
 
             select_movis = 0
             pil_df = []
@@ -143,10 +145,12 @@ class TakeTgif():
                     if not bad_movi and not low_movi:
                         # save frames and make
                         for i in range(len(frames)):
-                            id_frame = i
-                            img_path = os.path.join(dir_name, f'{id_movi}_{id_frame}.jpg')
-                            frames[i].save(img_path)
-                            pil_df.append([id_movi, f"{width},{height}", id_frame, [width, height], caption, img_path, self.patterns_to_search])
+                            if len(dir_image):
+                                id_frame = i
+                                img_path = os.path.join(dir_image, f'{id_movi}_{id_frame}.jpg')
+                                frames[i].save(img_path)
+
+                            pil_df.append([id_movi, f"{width},{height}", id_frame, [width, height], caption, img_path, self.patterns_to_search, url])
 
                         select_movis += 1
                         print(f"\rMovi {id_movi} have len = {len(frames)} take all move with W_{width} x H_{height} selected_{select_movis}\n")
@@ -155,9 +159,43 @@ class TakeTgif():
 
                 if len(pil_df) and not len(pil_df) % save_each:
                     df = pd.DataFrame(pil_df)
-                    df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
+                    df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' , 'url']
                     df.to_csv(file_path, index=False)
 
             df = pd.DataFrame(pil_df)
-            df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' ]
+            df.columns = ['id_movi', "w x h", 'id_frame', 'size_frame', 'caption_movi', 'paths', 'patterns' , 'url']
             df.to_csv(file_path, index=False)
+
+
+    def load_movies(self,
+                    df_path: pd.DataFrame,
+                    path_tmp = '/content',
+                
+        ):
+
+        self.df = pd.read_csv(df_path)
+        id_movies = self.df["id_movi"].unique()
+
+        path_gif = path_tmp + '/temp.gif' # save path tempory
+
+        dir_name = path_tmp + '/images'   # save path tempory
+        try: os.mkdir(dir_name)
+        except: pass
+
+        for id_movi in id_movies:
+            url =  self.train_df.loc[id_movi][0]
+            len_movi = self.df[self.df["id_movi"] == id_movi].shape[0]
+            #download gif
+            with open(path_gif, 'wb') as f:
+                f.write(requests.get(url).content)
+
+            # open gif
+            gif_img = PIL.Image.open(path_gif)
+            
+            # save frames and make
+            for i in range(len(frames)):
+                # take original frames
+                id_frame = i
+                frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)][:len_movi]
+                img_path = os.path.join(dir_name, f'{id_movi}_{id_frame}.jpg')
+                frames[i].save(img_path)
