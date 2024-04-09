@@ -181,7 +181,8 @@ class TakeTgif():
         dir_name = path_tmp + '/images'   # save path tempory
         try: os.mkdir(dir_name)
         except: pass
-
+        
+        saved_movis = 1
         for id_movi in id_movies:
             url =  self.train_df.loc[id_movi][0]
             len_movi = self.df[self.df["id_movi"] == id_movi].shape[0]
@@ -194,7 +195,11 @@ class TakeTgif():
             # take original frames
             frames = [frame.convert('RGB') for frame in PIL.ImageSequence.Iterator(gif_img)][:len_movi]
             
+            
             # save frames and make
-            for id_frame in range(len(frames)):
+            for id_frame in range(len_movi):
                 img_path = os.path.join(dir_name, f'{id_movi}_{id_frame}.jpg')
-                frames[i].save(img_path)
+                frames[id_frame].save(img_path)
+                print(f"\rMovi {id_movi} have len = {len_movi} saved_{saved_movis}\n")
+            
+            saved_movis+=1
