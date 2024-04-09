@@ -75,9 +75,9 @@ class Encode_Kand22():
                                         max_length=self.prior_tokenizer.model_max_length,
                                         truncation=True,
                                         return_tensors="pt"
-                                        )
+                                        ).to(self.DEVICE)
             
-            text_embeds = self.prior_T2I.text_encoder(**inputs.to(self.DEVICE)).text_embeds
+            text_embeds = self.prior_T2I.text_encoder(**inputs).text_embeds
 
             
             last_hidden_states = self.prior_T2I.text_encoder(**inputs).last_hidden_state
@@ -104,6 +104,9 @@ class Encode_Kand22():
                      save_each = 25
                      ):
           
+          if type(pil_df) == str:
+               pil_df = pd.read_csv(pil_df)
+
           pil_ids_movi_unique = pil_df.id_movi.unique()
           all_data = []
 
@@ -142,9 +145,9 @@ class Encode_Kand22():
                       dict_movi['img_embeds'] = image_embeds
                       dict_movi['text_embed'] = text_embeds.cpu()
                       dict_movi['last_hidden_state'] = last_hidden_states.cpu()
-                      dict_movi['unclip_embed'] = self.get_unclip_embeds.cpu()
+                      dict_movi['unclip_embed'] = self.get_unclip_embeds(caption).cpu()
                       dict_movi['ids_frames'] = ids_frame
-                      del(image_embeds, inputs)
+                      del(image_embeds, text_embeds, last_hidden_states)
                       self.flush_memory()
                       all_data.append(dict_movi)
 
