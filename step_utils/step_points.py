@@ -56,6 +56,7 @@ class ComputeDiffPoints():
         config[f'id_img_emb_s'] = []
         config[f'id_img_delta'] = []
         config[f'delta'] = []
+        config[f'norm_delta'] = []
 
         if len(idxs_1) > 1:
           for id_1 in idxs_1:
@@ -68,6 +69,7 @@ class ComputeDiffPoints():
                 config[f'id_img_emb_s'].append(id_img_emb_s)
                 config[f'id_img_delta'].append(id_1)
                 config[f'delta'].append(delta)
+                config[f'norm_delta'].append(delta/points_1[id_1])
         return config
 
 
