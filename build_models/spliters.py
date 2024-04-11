@@ -37,7 +37,7 @@ class Increment_spliter(nn.Module):
         # Apply CrossAttentionLayer text_hidden_states and increment
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
 
-        prior_embeds = F.normalize(concat_data, p=2.0, dim=2)
+        prior_embeds = F.normalize(prior_embeds, p=2.0, dim=2)
 
         prior_trained = self.lin_start(prior_embeds)
 

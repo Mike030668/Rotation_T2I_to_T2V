@@ -16,6 +16,7 @@ class ComputeDiffPoints():
         # normal way
         self.s_point = self.time_labels[0]
         self.e_point = self.time_labels[-1]
+
         #remove start point
         self.points = self.time_labels[1:]
         self.next_points = self.points + 1
@@ -24,25 +25,26 @@ class ComputeDiffPoints():
         self.back_points = (self.e_point - self.time_labels)[::-1]
         self.back_s_point = self.back_points[0]
         self.back_e_point = self.back_points[-1]
+
         #remove start point
         self.back_points = self.back_points[1:]
         self.back_next_points = self.back_points + 1
 
+    def getpoints_rotetrain(self):
+        self.__init_data()
+
+        configs = self.__way_config(self.points, self.points, self.e_point)
+        back_configs = self.__way_config(self.back_points, self.back_points, self.back_e_point)
+        return configs, back_configs
+
     def getpoints_diftrain(self):
         self.__init_data()
 
-        configs = self.__way_config(self.points, self.next_points)
-        back_configs = self.__way_config(self.back_points, self.back_next_points)
+        configs = self.__way_config(self.points, self.next_points, self.e_point)
+        back_configs = self.__way_config(self.back_points, self.back_next_points, self.back_e_point)
         return configs, back_configs
 
-    def getpoints_train(self):
-        self.__init_data()
-
-        configs = self.__way_config(self.points, self.points)
-        back_configs = self.__way_config(self.back_points, self.back_points)
-        return configs, back_configs
-
-    def __way_config(self, points_1, points_2):
+    def __way_config(self, points_1, points_2, end):
         idxs_1 = []
         idxs_2 = []
         for i, _ in enumerate(points_1):
@@ -69,7 +71,7 @@ class ComputeDiffPoints():
                 config[f'id_img_emb_s'].append(id_img_emb_s)
                 config[f'id_img_delta'].append(id_1)
                 config[f'delta'].append(delta)
-                config[f'norm_delta'].append(delta/points_1[id_1])
+                config[f'norm_delta'].append(delta/(end - points_2[id_2]))
         return config
 
 
