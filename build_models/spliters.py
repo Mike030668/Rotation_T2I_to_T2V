@@ -37,14 +37,15 @@ class Increment_spliter(nn.Module):
         # Apply CrossAttentionLayer text_hidden_states and increment
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
 
+        prior_embeds = F.normalize(concat_data, p=2.0, dim=2)
+
         prior_trained = self.lin_start(prior_embeds)
 
         concat_data = torch.concat([text_hidden_states,
                                     prior_trained,
                                     cross_text_rise],
                                     axis=1)
-
-        concat_data = F.normalize(concat_data, p=2.0, dim=1)
+        
         concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = 1)
         #print("concat_data", concat_data.shape)
         out = self.block_1(concat_data.permute(0, 2, 1))
