@@ -71,9 +71,9 @@ class ComputeDiffPoints():
                 config[f'id_img_emb_s'].append(id_img_emb_s)
                 config[f'id_img_delta'].append(id_1)
                 config[f'delta'].append(delta)
-                config[f'norm_delta'].append(delta/(end - points_2[id_2]))
+                #config[f'norm_delta'].append(delta/(end - points_2[id_2]))
+                config[f'norm_delta'].append(delta/end)
         return config
-
 
 
 # Create class to shuffle array
