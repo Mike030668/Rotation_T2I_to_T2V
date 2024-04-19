@@ -7,7 +7,7 @@ class RotationVectors:
         Returns the unit vectors of the input vectors.
         vectors: torch tensor of shape (batch_size, vector_dim)
         """
-        return vectors / torch.norm(vectors, dim=1, keepdim=True)
+        return vectors / (torch.norm(vectors, dim=1, keepdim=True) + 1e-10)
 
     def angle(self, vectors1, vectors2):
         """
@@ -20,7 +20,9 @@ class RotationVectors:
         minor = torch.det(torch.stack((v1_u[:, -2:], v2_u[:, -2:]), dim=1))
         if (minor == 0).any():
             raise NotImplementedError('Some vectors are too odd!')
-        return torch.sign(minor) * torch.acos(torch.clamp(torch.sum(v1_u * v2_u, dim=1), -1.0, 1.0))
+        # clamp to -1.0, 1.0
+        cos_ang = torch.clamp(torch.sum(v1_u * v2_u, dim=1), -1.0, 1.0)
+        return torch.sign(minor) * torch.acos(cos_ang)
 
     def get_rotation_matrix(self, vec_1, vec_2):
         """
