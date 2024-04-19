@@ -1,15 +1,36 @@
 import torch
 
 class RotationVectors:
+    def __init__(self, epsilon=1e-8):
+        self.epsilon = epsilon
+
     def unit_vector(self, vectors):
         """
         TORCH
         Returns the unit vectors of the input vectors.
         vectors: torch tensor of shape (batch_size, vector_dim)
         """
-        return vectors / (torch.norm(vectors, dim=1, keepdim=True) + 1e-8)
-
+        return vectors / (torch.norm(vectors, dim=1, keepdim=True) + self.epsilon)
+    
     def angle(self, vectors1, vectors2):
+        """
+        Returns the angles in radians between batches of high-dimensional vectors.
+        Handles cases where vectors may be nearly parallel.
+        """
+        v1_u = self.unit_vector(vectors1)
+        v2_u = self.unit_vector(vectors2)
+
+        # Calculate cosine of angle
+        cos_angle = torch.clamp(torch.sum(v1_u * v2_u, dim=1), -1.0, 1.0)
+
+        # Handle cases where cosine angle is close to ±1
+        parallel = torch.abs(cos_angle) > 1.0 - self.epsilon
+        angles = torch.acos(cos_angle)
+        angles[parallel] = 0.0 # Assume no rotation needed if vectors are parallel
+
+        return angles
+
+    def __angle(self, vectors1, vectors2):
         """
         Returns the angles in radians between the given batches of vectors.
         vectors1, vectors2: torch tensors of shape (batch_size, vector_dim)
