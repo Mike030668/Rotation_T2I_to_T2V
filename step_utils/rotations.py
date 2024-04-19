@@ -7,7 +7,7 @@ class RotationVectors:
         Returns the unit vectors of the input vectors.
         vectors: torch tensor of shape (batch_size, vector_dim)
         """
-        return vectors / (torch.norm(vectors, dim=1, keepdim=True) + 1e-10)
+        return vectors / (torch.norm(vectors, dim=1, keepdim=True) + 1e-8)
 
     def angle(self, vectors1, vectors2):
         """
