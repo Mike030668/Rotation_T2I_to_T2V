@@ -69,7 +69,8 @@ class DualBranchSpliter(nn.Module):
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
-
+        self.emb_dim = emb_dim
+        
         # Rise branch for handling rise-influenced data
         self.down_block_1 = nn.Sequential(
             ImprovedBlock(79, 128, 0.3),
