@@ -40,7 +40,7 @@ class DualBranchSpliter_next(nn.Module):
         text_hidden_states = self.pos_encoder(text_hidden_states)
 
         # nomolise espessialy for regress
-        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = 1)
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
 
         # Base branch processing
         prior_trained = self.lin_start(prior_embeds)
