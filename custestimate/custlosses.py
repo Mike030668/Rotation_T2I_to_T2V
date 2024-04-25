@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from step_utils.rotations import RotationVectors
 
 class CombinedLoss_base(nn.Module):
-    def __init__(self, weight_rote=0.5, weight_mse =0.5, cos_way = -1):
+    def __init__(self, weight_rote=0.5, weight_mse =0.5, cos_way = -1, dim_norm = 1):
         super(CombinedLoss_base, self).__init__()
 
         self.mse_loss = nn.MSELoss(reduction='none')
@@ -12,6 +12,7 @@ class CombinedLoss_base(nn.Module):
         self.weight_mse = weight_mse
         self.weight_rote = weight_rote
         self.cos_way = cos_way
+        self.dim_norm = dim_norm
 
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
 
@@ -21,8 +22,8 @@ class CombinedLoss_base(nn.Module):
 
         # Calculate cos_loss,
         target = torch.ones(diff_img.shape[-1])
-        diff_img_norm = F.normalize(diff_img, dim = 0)
-        diff_unclip_norm = F.normalize(diff_unclip, dim = 0)
+        diff_img_norm = F.normalize(diff_img, dim = self.dim_norm)
+        diff_unclip_norm = F.normalize(diff_unclip, dim = self.dim_norm)
 
         if self.cos_way == 1:
             cos_loss = 1 - self.cos_loss(diff_img_norm.T, diff_unclip_norm.T, target.to(device))  # Shape (None, 1, 1280)
@@ -36,6 +37,8 @@ class CombinedLoss_base(nn.Module):
 
         return self.weight_rote * cos_loss, self.weight_mse * mse_loss
     
+
+############### CombinedLoss_trans ##############################
 
 class TransformationBasedRotationLoss(nn.Module):
     def __init__(self, alpha = 0.7, betta = 0.3):
