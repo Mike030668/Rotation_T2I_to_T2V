@@ -63,3 +63,43 @@ class ImprovedBlock(nn.Module):
             identity = self.identity_mapping(identity)
         out += identity  # Residual connection
         return out
+
+
+class LearnableDropout(nn.Module):
+    def __init__(self, initial_p=0.3, min_p=0.0, max_p=1.0):
+        super(LearnableDropout, self).__init__()
+        self.p = nn.Parameter(torch.tensor(initial_p))
+        self.min_p = min_p
+        self.max_p = max_p
+
+    def forward(self, x):
+        p = torch.sigmoid(self.p)  # use sigmoid to limit p between 0 and 1
+        p = self.min_p + (self.max_p - self.min_p) * p  # additional constraint p between min_p and max_p
+        return F.dropout(x, p = p.item(), training=self.training)
+    
+
+class ImprovedBlock_next(nn.Module):
+    def __init__(self, in_dim, out_dim, used_act:object):
+        super(ImprovedBlock_next, self).__init__()
+        self.lin = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+        self.act = used_act() 
+        self.learnable_dropout = LearnableDropout()
+
+        # Add a linear transformation for identity if the dimensions do not match
+        if in_dim != out_dim:
+            self.identity_mapping = nn.Linear(in_dim, out_dim)
+        else:
+            self.identity_mapping = None
+
+    def forward(self, x):
+        identity = x
+        out = self.lin(x)
+        out = self.act(out)
+        out = self.norm(out)
+        out = self.learnable_dropout(out)
+        # Apply a linear transformation to identity if necessary
+        if self.identity_mapping is not None:
+            identity = self.identity_mapping(identity)
+        out += identity  # Residual connection
+        return out
