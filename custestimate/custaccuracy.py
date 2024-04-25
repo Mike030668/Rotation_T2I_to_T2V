@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 class CosAccuracy(nn.Module):
   def __init__(self):
     super(CosAccuracy, self).__init__()
