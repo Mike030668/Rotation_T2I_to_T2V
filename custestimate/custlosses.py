@@ -124,13 +124,15 @@ class CombinedLoss_cos_trans(nn.Module):
                   betta = 0.3):
         
         super(CombinedLoss_cos_trans, self).__init__()
-        self.rotation_loss = TransformationBasedRotationLoss(alpha, betta)
+        self.trans_loss = TransformationBasedRotationLoss(alpha, betta)
         self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
         self.mse_loss = nn.MSELoss(reduction='none')
         self.weight_rote = weight_rote
         self.weight_mse = weight_mse
         self.cos_way = cos_way
         self.dim_norm = dim_norm
+        self.alfa = alpha
+        self.betta = betta
 
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip ): #vec, target):
 
@@ -154,6 +156,8 @@ class CombinedLoss_cos_trans(nn.Module):
         mse_loss = torch.mean(mse_loss, dim=0)  # Reduce to Shape (None, 1) but keep last dim for matching
 
         # Calculate rotation transformation loss
-        rotation_loss = cos_loss +  self.rotation_loss(diff_img, diff_unclip)  # Expected shape (None, 1280)
+        rotation_loss = cos_loss
+        if self.alfa or self.betta:
+            rotation_loss = rotation_loss +  self.trans_loss(diff_img, diff_unclip)  # Expected shape (None, 1280)
 
         return self.weight_rote * rotation_loss, self.weight_mse * mse_loss

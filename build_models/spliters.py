@@ -60,7 +60,6 @@ class Increment_spliter(nn.Module):
 
 
 
-
 class Simple_spliter(nn.Module):
     def __init__(self, emb_dim):
           super(Simple_spliter, self).__init__()
