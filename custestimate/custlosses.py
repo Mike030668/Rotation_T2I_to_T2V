@@ -84,7 +84,7 @@ class TransformationBasedRotationLoss(nn.Module):
         loss = loss_a + loss_b
 
         loss = torch.mean(loss, dim=0)
-        loss = torch.nan_to_num(loss, nan=0.0, posinf=1.0, neginf = -1.0)
+        loss = torch.nan_to_num(loss, nan=0.0, posinf=0.1, neginf = -0.1)
 
         return loss
 
