@@ -132,6 +132,7 @@ class RoteTrainer():
                      add_back_train = False,
                      add_rote_train = False,
                      add_diff_train = False,
+                     pow_rote = 1,
                      clip_grad_norm = False,
                      change_name_to_save = None,
                      ):
@@ -141,6 +142,7 @@ class RoteTrainer():
             self.add_back_train = add_back_train
             self.add_rote_train = add_rote_train
             self.add_diff_train = add_diff_train
+            self.pow_rote = pow_rote
             self.fr_sv_cpt = friq_save_checkpoint
             self.window = window
             self.JDUN_END = jdun_end
@@ -455,14 +457,14 @@ class RoteTrainer():
                                 cos_sim_1 = torch.cosine_similarity(take_base_img_embs.to(self.DEVICE), take_base_unclip_embs, dim = -1)
 
                                 # compute roted unclip_embs with R_marixes_i2i and cos_sim base_img_embs and base_unclip_embs
-                                unclip_embs_2rt = self.RV.cosin_rotate(take_base_unclip_embs, cos_sim_1.to(self.DEVICE), R_marixes_i2i)
+                                unclip_embs_2rt = self.RV.cosin_rotate(take_base_unclip_embs, cos_sim_1.to(self.DEVICE), R_marixes_i2i,  power = self.pow_rote)
 
                                 # get rotation marixes_u2u
                                 R_marixes_u2u = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1).to(torch.float32).to(self.DEVICE),
                                                                             unclip_embs_2rt.squeeze(1).to(torch.float32))
 
                                 cos_sim_2 = torch.cosine_similarity(take_base_unclip_embs.to(self.DEVICE), take_text_embs, dim = -1)
-                                text_hid_states_2rt = self.RV.cosin_rotate(take_text_hid_states, cos_sim_2.to(self.DEVICE), R_marixes_u2u)
+                                text_hid_states_2rt = self.RV.cosin_rotate(take_text_hid_states, cos_sim_2.to(self.DEVICE), R_marixes_u2u, power = self.pow_rote)
 
 
                                 # rotation predict
@@ -569,7 +571,7 @@ class RoteTrainer():
                                 R_marixes = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1), next_unclip_embs.squeeze(1))
 
                                 cos_sim = torch.cosine_similarity(take_base_unclip_embs, take_text_embs.to(self.DEVICE), dim = -1)
-                                next_text_hid_states = self.RV.cosin_rotate(take_text_hid_states, cos_sim.to(torch.float32).to(self.DEVICE), R_marixes)
+                                next_text_hid_states = self.RV.cosin_rotate(take_text_hid_states, cos_sim.to(torch.float32).to(self.DEVICE), R_marixes,  power = self.pow_rote)
 
                                 # dif predict from base predict
                                 next_pred_unclip_embs = self.model(
