@@ -137,9 +137,9 @@ class DualBranchSpliter(nn.Module):
         return out
 
 
-class DualBranchSpliter_next(nn.Module):
+class DualBranchSpliter_next_1(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
-        super(DualBranchSpliter_next, self).__init__()
+        super(DualBranchSpliter_next_1, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
@@ -205,9 +205,9 @@ class DualBranchSpliter_next(nn.Module):
         return out
 
 
-class DualBranchSpliter_next_1(nn.Module):
+class DualBranchSpliter_next_2(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
-        super(DualBranchSpliter_next_1, self).__init__()
+        super(DualBranchSpliter_next_2, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
