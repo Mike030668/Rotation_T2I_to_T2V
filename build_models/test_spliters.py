@@ -101,12 +101,12 @@ class Increment_spliter_2(nn.Module):
 
         # nomolise espessialy for regress
         prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
-        prior_trained = self.lin_start(prior_embeds)
-        cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
+        #prior_trained = self.lin_start(prior_embeds)
+        cross_text_prior = self.cross_attention(text_hidden_states, prior_embeds)
 
 
         concat_data = torch.concat([text_hidden_states,
-                                    prior_trained,
+                                    prior_embeds,
                                     cross_text_prior,
                                     cross_text_rise],
                                     axis=1)
