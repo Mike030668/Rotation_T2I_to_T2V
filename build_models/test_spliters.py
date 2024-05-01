@@ -277,8 +277,10 @@ class DualBranchSpliter_1(nn.Module):
         self.down_block_fin = nn.Sequential(
             ImprovedBlock(64, 32, 0.3),
             ImprovedBlock(32, 16, 0.3),
-            ImprovedBlock(16, 1, 0.3),
+            ImprovedBlock(16, 4, 0.3),
         ).to(device)
+
+        self.lin_final = nn.Linear(4, 1).to(device)
 
     def forward(self, text_hidden_states, prior_embeds, rise):
 
@@ -294,18 +296,17 @@ class DualBranchSpliter_1(nn.Module):
         prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         # Base branch processing
         prior_trained = self.lin_start(prior_embeds)
-        cross_text_prior = self.cross_attention(prior_trained, increment)
+        cross_prior_rise = self.cross_attention(prior_trained, increment)
 
         concat_base = torch.concat([text_hidden_states,
                                     prior_trained,
-                                    cross_text_prior,
+                                    cross_prior_rise,
                                     cross_text_rise],
                                     axis=1)
-
+        concat_base = torch.nn.functional.normalize(concat_base, p=2.0, dim = -1)
+        base_output = self.down_block_1(concat_base.permute(0, 2, 1))
 
         cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
-
-        base_output = self.down_block_1(concat_base.permute(0, 2, 1))
 
         cross_emb_output = self.down_block_2(cross_text_prior.permute(0, 2, 1))
 
@@ -313,8 +314,12 @@ class DualBranchSpliter_1(nn.Module):
         concat_out = torch.concat([base_output,
                                     cross_emb_output],
                                     axis=-1)
+        concat_out = torch.nn.functional.normalize(concat_out, p=2.0, dim = -1)
 
-        out = self.down_block_fin(concat_out).permute(0, 2, 1)
+        out = self.down_block_fin(concat_out)
+        # next predicted prior_embeds
+        out = self.lin_final(out).permute(0, 2, 1)
+        
         return out
 
 
