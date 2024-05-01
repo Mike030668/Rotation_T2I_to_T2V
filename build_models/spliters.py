@@ -17,8 +17,8 @@ class Increment_spliter_next(nn.Module):
         self.lin_increment= nn.Linear(1, emb_dim).to(device)
         self.dropout = nn.Dropout(0.3).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        # blocks with trained dropout and sckit connections
         self.encode_block = nn.Sequential(
-            # blocks with trained dropout and sckit connections
             ImprovedBlock_next(156, 256, nn.GELU),
             ImprovedBlock_next(256, 128, nn.GELU),
             ImprovedBlock_next(128, 64, nn.GELU),
