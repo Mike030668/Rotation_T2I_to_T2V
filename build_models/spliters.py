@@ -2,7 +2,63 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from  build_models.special_layers import CrossAttentionLayer, RotaryPositionalEmbedding
-from  build_models.special_layers import ImprovedBlock
+from  build_models.special_layers import ImprovedBlock, ImprovedBlock_next
+
+class Increment_spliter_next(nn.Module):
+    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+        super(Increment_spliter_next, self).__init__()
+        # add CrossAttentionLayer
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        # add RotaryPositionalEmbedding
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+
+        # others
+        self.emb_dim = emb_dim
+        self.lin_increment= nn.Linear(1, emb_dim).to(device)
+        self.dropout = nn.Dropout(0.3).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        self.encode_block = nn.Sequential(
+            # blocks with trained dropout and sckit connections
+            ImprovedBlock_next(156, 256, nn.GELU),
+            ImprovedBlock_next(256, 128, nn.GELU),
+            ImprovedBlock_next(128, 64, nn.GELU),
+            ImprovedBlock_next(64, 32, nn.GELU),
+            ImprovedBlock_next(32, 16, nn.GELU),
+            ImprovedBlock_next(16, 8, nn.GELU),
+            ImprovedBlock_next(8, 4, nn.GELU)
+        ).to(device)
+
+        self.lin_final = nn.Linear(4, 1).to(device)
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+        # increment block
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment =  nn.LeakyReLU()(increment)
+
+        # Use RotaryPositionalEmbedding
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+        # Apply CrossAttentionLayer text_hidden_states and increment
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
+        # normalise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        prior_trained = self.lin_start(prior_embeds)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
+
+        # concat block
+        concat_data = torch.concat([text_hidden_states,
+                                    prior_embeds,
+                                    cross_text_prior,
+                                    cross_text_rise],
+                                    axis=1)
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
+
+        # encode_block with trained dropout and sckit connections
+        out = self.encode_block(concat_data.permute(0, 2, 1))
+
+        # next predicted prior_embeds
+        out = self.lin_final(out).permute(0, 2, 1)
+        return out
 
 
 class Increment_spliter(nn.Module):
@@ -19,7 +75,7 @@ class Increment_spliter(nn.Module):
         self.dropout = nn.Dropout(0.3).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
 
-        self.block_1 = ImprovedBlock(155, 256, 0.3).to(device)
+        self.block_1 = ImprovedBlock(156, 256, 0.3).to(device)
         self.block_2 = ImprovedBlock(256, 128, 0.3).to(device)
         self.block_3 = ImprovedBlock(128, 64, 0.3).to(device)
         self.block_4 = ImprovedBlock(64, 32, 0.3).to(device)
@@ -29,24 +85,30 @@ class Increment_spliter(nn.Module):
 
         self.lin_final = nn.Linear(4, 1).to(device)
 
-
     def forward(self, text_hidden_states, prior_embeds, rise):
-
+        # increment block
         increment = self.lin_increment(rise).unsqueeze(1)
+        increment =  nn.LeakyReLU()(increment)
+
         # Use RotaryPositionalEmbedding
         text_hidden_states = self.pos_encoder(text_hidden_states)
         # Apply CrossAttentionLayer text_hidden_states and increment
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
 
+        # normalise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         prior_trained = self.lin_start(prior_embeds)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
 
+        # concat block
         concat_data = torch.concat([text_hidden_states,
-                                    prior_trained,
+                                    prior_embeds,
+                                    cross_text_prior,
                                     cross_text_rise],
                                     axis=1)
-        
-        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = 1)
-        #print("concat_data", concat_data.shape)
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
+
+        # down blocks
         out = self.block_1(concat_data.permute(0, 2, 1))
         out = self.block_2(out)
         out = self.block_3(out)
@@ -54,10 +116,10 @@ class Increment_spliter(nn.Module):
         out = self.block_5(out)
         out = self.block_6(out)
         out = self.block_7(out)
-        # Use lin_final for the last step
+
+        # next predicted prior_embeds
         out = self.lin_final(out).permute(0, 2, 1)
         return out
-
 
 
 class Simple_spliter(nn.Module):
