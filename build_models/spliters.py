@@ -15,10 +15,9 @@ class Increment_spliter_next(nn.Module):
         # others
         self.emb_dim = emb_dim
         self.lin_increment= nn.Linear(1, emb_dim).to(device)
-        self.dropout = nn.Dropout(0.3).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
         # blocks with trained dropout and sckit connections
-        self.encode_block = nn.Sequential(
+        self.down_block = nn.Sequential(
             ImprovedBlock_next(156, 256, nn.GELU),
             ImprovedBlock_next(256, 128, nn.GELU),
             ImprovedBlock_next(128, 64, nn.GELU),
@@ -54,7 +53,7 @@ class Increment_spliter_next(nn.Module):
         concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
 
         # encode_block with trained dropout and sckit connections
-        out = self.encode_block(concat_data.permute(0, 2, 1))
+        out = self.down_block(concat_data.permute(0, 2, 1))
 
         # next predicted prior_embeds
         out = self.lin_final(out).permute(0, 2, 1)
