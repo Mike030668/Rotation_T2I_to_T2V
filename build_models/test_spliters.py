@@ -250,6 +250,77 @@ class DualBranchSpliter(nn.Module):
         out = self.down_block_fin(concat_out).permute(0, 2, 1)
         return out
 
+class DualBranchSpliter_1(nn.Module):
+    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+        super(DualBranchSpliter_1, self).__init__()
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+        self.lin_increment = nn.Linear(1, emb_dim).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        self.emb_dim = emb_dim
+        
+        # Rise branch for handling rise-influenced data
+        self.down_block_1 = nn.Sequential(
+            ImprovedBlock(156, 128, 0.3),
+            ImprovedBlock(128, 64, 0.3),
+            ImprovedBlock(64, 32, 0.3),
+        ).to(device)
+
+        # Rise branch for handling rise-influenced data
+        self.down_block_2 = nn.Sequential(
+            ImprovedBlock(77, 128, 0.3),
+            ImprovedBlock(128, 64, 0.3),
+            ImprovedBlock(64, 32, 0.3),
+        ).to(device)
+
+        # Rise branch for handling rise-influenced data
+        self.down_block_fin = nn.Sequential(
+            ImprovedBlock(64, 32, 0.3),
+            ImprovedBlock(32, 16, 0.3),
+            ImprovedBlock(16, 1, 0.3),
+        ).to(device)
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+
+        # Rise branch processing
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment =  nn.LeakyReLU()(increment)
+
+        # Positional encoding applied to text hidden states
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
+        # nomolise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        # Base branch processing
+        prior_trained = self.lin_start(prior_embeds)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
+
+        concat_base = torch.concat([text_hidden_states,
+                                    prior_trained,
+                                    cross_text_prior,
+                                    cross_text_rise],
+                                    axis=1)
+
+
+        cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
+
+        base_output = self.down_block_1(concat_base.permute(0, 2, 1))
+
+        cross_emb_output = self.down_block_2(cross_text_prior.permute(0, 2, 1))
+
+
+        concat_out = torch.concat([base_output,
+                                    cross_emb_output],
+                                    axis=-1)
+
+        out = self.down_block_fin(concat_out).permute(0, 2, 1)
+        return out
+
+
+
+
+
 
 class DualBranchSpliter_next_1(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
