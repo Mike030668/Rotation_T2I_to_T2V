@@ -450,84 +450,76 @@ class DualBranchSpliter_1(nn.Module):
         return out
 
 
+
 class DualBranchSpliter_up(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
         super(DualBranchSpliter_up, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
+        self.lin_final = nn.Linear(4, 1).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
         self.emb_dim = emb_dim
         
         # Rise branch for handling rise-influenced data
         self.down_block_1 = nn.Sequential(
-            ImprovedBlock(157, 256, 0.3),
-            ImprovedBlock(256, 128, 0.3),
+            ImprovedBlock(79, 128, 0.3),
             ImprovedBlock(128, 64, 0.3),
             ImprovedBlock(64, 32, 0.3),
         ).to(device)
 
         # Rise branch for handling rise-influenced data
         self.down_block_2 = nn.Sequential(
-            ImprovedBlock(77, 128, 0.3),
+            ImprovedBlock(154, 256, 0.3),
+            ImprovedBlock(256, 128, 0.3),
             ImprovedBlock(128, 64, 0.3),
             ImprovedBlock(64, 32, 0.3),
         ).to(device)
 
         # Rise branch for handling rise-influenced data
         self.down_block_fin = nn.Sequential(
-            ImprovedBlock(33, 16, 0.3),
+            ImprovedBlock(64, 32, 0.3),
+            ImprovedBlock(32, 16, 0.3),
             ImprovedBlock(16, 4, 0.3),
         ).to(device)
-
-        self.lin_final = nn.Linear(4, 1).to(device)
 
     def forward(self, text_hidden_states, prior_embeds, rise):
         # Positional encoding applied to text hidden states
         text_hidden_states = self.pos_encoder(text_hidden_states)
 
-        # nomolise espessialy for regress
-        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         # Base branch processing
         prior_trained = self.lin_start(prior_embeds)
-
-
         # Rise branch processing
         increment = self.lin_increment(rise).unsqueeze(1)
-        increment =  nn.LeakyReLU()(increment)
+
+        concat_base = torch.concat([text_hidden_states,
+                                    prior_trained,
+                                    increment],
+                                    axis=1)
 
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
-        cross_prior_rise = self.cross_attention(prior_trained, increment)
+        cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
 
-        concat_base = torch.concat([
-                            text_hidden_states,
-                            prior_trained,
-                            increment,
-                            cross_text_rise,
-                            cross_prior_rise
-                            ],
-                            axis=1)
+        concat_cross = torch.concat([cross_text_rise,
+                                    cross_text_prior],
+                                    axis=1)
+
 
         base_output = self.down_block_1(concat_base.permute(0, 2, 1))
 
-        cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
-
-        cross_prior_output = self.down_block_2(cross_text_prior.permute(0, 2, 1))
-
-        cross_prior_output = torch.bmm(rise.repeat(1,32).unsqueeze(1), cross_prior_output.permute(0,2,1))
+        cross_output = self.down_block_2(concat_cross.permute(0, 2, 1))
 
 
         concat_out = torch.concat([base_output,
-                                  cross_prior_output.permute(0,2,1)
-                                   ],
-                                  axis=2)
+                    cross_output],
+                    axis=-1)
         concat_out = torch.nn.functional.normalize(concat_out, p=2.0, dim = -1)
 
-        out = self.down_block_fin(concat_out)
-         # next predicted prior_embeds
+        out = self.down_block_fin(concat_out).permute(0, 2, 1)
+
+        # next predicted prior_embeds
         out = self.lin_final(out).permute(0, 2, 1)
         return out
-
 
 
 
