@@ -487,8 +487,10 @@ class DualBranchSpliter_up(nn.Module):
         # Positional encoding applied to text hidden states
         text_hidden_states = self.pos_encoder(text_hidden_states)
 
+        prior_embeds = torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         # Base branch processing
         prior_trained = self.lin_start(prior_embeds)
+        
         # Rise branch processing
         increment = self.lin_increment(rise).unsqueeze(1)
 
@@ -513,7 +515,6 @@ class DualBranchSpliter_up(nn.Module):
         concat_out = torch.concat([base_output,
                                     cross_output],
                                     axis=-1)
-        concat_out = torch.nn.functional.normalize(concat_out, p=2.0, dim = -1)
 
         out = self.down_block_fin(concat_out)
         # next predicted prior_embeds
