@@ -511,12 +511,11 @@ class DualBranchSpliter_up(nn.Module):
 
 
         concat_out = torch.concat([base_output,
-                    cross_output],
-                    axis=-1)
+                                    cross_output],
+                                    axis=-1)
         concat_out = torch.nn.functional.normalize(concat_out, p=2.0, dim = -1)
 
-        out = self.down_block_fin(concat_out).permute(0, 2, 1)
-
+        out = self.down_block_fin(concat_out)
         # next predicted prior_embeds
         out = self.lin_final(out).permute(0, 2, 1)
         return out
