@@ -469,7 +469,7 @@ class DualBranchSpliter_up(nn.Module):
 
         # Rise branch for handling rise-influenced data
         self.down_block_2 = nn.Sequential(
-            ImprovedBlock(78, 128, 0.3),
+            ImprovedBlock(77, 128, 0.3),
             ImprovedBlock(128, 64, 0.3),
             ImprovedBlock(64, 32, 0.3),
         ).to(device)
@@ -508,16 +508,12 @@ class DualBranchSpliter_up(nn.Module):
                             ],
                             axis=1)
 
+        base_output = self.down_block_1(concat_base.permute(0, 2, 1))
 
         cross_text_prior = self.cross_attention(text_hidden_states, prior_trained)
 
-        concat_cross_prior = torch.concat([cross_prior_rise,
-                                          cross_text_prior],
-                                          axis=1)
+        cross_prior_output = self.down_block_2(cross_text_prior.permute(0, 2, 1))
 
-        base_output = self.down_block_1(concat_base.permute(0, 2, 1))
-
-        cross_prior_output = self.down_block_2(concat_cross_prior.permute(0, 2, 1))
         cross_prior_output = torch.bmm(rise.repeat(1,32).unsqueeze(1), cross_prior_output.permute(0,2,1))
 
 
