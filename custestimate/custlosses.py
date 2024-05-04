@@ -120,7 +120,7 @@ class CombinedLoss_cos_trans(nn.Module):
     def __init__(self, weight_rote=0.5,
                   weight_mse=0.5, 
                   cos_way = -1, 
-                  dim_norm = 1, 
+                  dim_norm = -1, 
                   alpha = 0.7, 
                   betta = 0.3):
         
