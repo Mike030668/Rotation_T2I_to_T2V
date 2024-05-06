@@ -280,11 +280,16 @@ class TransformLoss(nn.Module):
         self.weight_rote = weight_rote
         self.weight_mse = weight_mse
 
-    def forward(self, vec_1, vec_2):
+    def forward(self,  init_img_vec, next_img_vec, init_unclip, pred_unclip):
 
-        mask = torch.norm(vec_1, dim=-1, keepdim=True) > 1e-8
-        vec_1 = vec_1[mask.squeeze(1)]
-        vec_2 = vec_2[mask.squeeze(1)]
+        device = pred_unclip.device
+        diff_img =  (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32) #
+        diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
+
+        mask = torch.norm(diff_img, dim=-1, keepdim=True) > 1e-8
+        vec_1 = diff_img[mask.squeeze(1)]
+        vec_2 = diff_unclip[mask.squeeze(1)]
+        
 
 
         # Calculate angle and unit vectors
@@ -303,10 +308,10 @@ class TransformLoss(nn.Module):
         transform_a = (n2n1T - n1n2T) * sin_a
         transform_b = (n1n1T + n2n2T) * cos_a_minus_1
         transform = self.alpha*transform_a + self.betta*transform_b
-        u_vec = torch.ones(vec_1.shape).to(vec_1.device)
-        zer_target = torch.zeros(vec_1.shape).to(vec_1.device)
-        one_target = torch.ones(vec_1.shape).to(vec_1.device)
-        I = torch.eye(vec_1.shape[-1]).unsqueeze(0).repeat(vec_1.shape[0],1,1).to(vec_1.device)
+        u_vec = torch.ones(vec_1.shape).to(device)
+        zer_target = torch.zeros(vec_1.shape).to(device)
+        one_target = torch.ones(vec_1.shape).to(device)
+        I = torch.eye(vec_1.shape[-1]).unsqueeze(0).repeat(vec_1.shape[0],1,1).to(device)
 
 
         # Apply the transformation to target
