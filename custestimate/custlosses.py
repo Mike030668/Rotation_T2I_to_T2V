@@ -327,4 +327,8 @@ class TransformLoss(nn.Module):
         loss_u = torch.nan_to_num(loss_u, nan=0.0, posinf=0.1, neginf = -0.1)
         loss_I = torch.nan_to_num(loss_I, nan=0.0, posinf=0.1, neginf = -0.1)
 
-        return self.weight_rote * loss_u, self.weight_mse * loss_I
+        # Calculate MSE loss
+        mse_loss = self.mse_loss(diff_img, diff_unclip)  # Shape (None, 1, 1280)
+        mse_loss = torch.mean(mse_loss, dim=0) + loss_I # Reduce to Shape (None, 1) but keep last dim for matching
+
+        return self.weight_rote * loss_u, self.weight_mse * mse_loss
