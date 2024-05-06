@@ -366,6 +366,70 @@ class Increment_spliter_5(nn.Module):
         return out
 
 
+class Increment_spliter_5_1(nn.Module):
+    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+        super(Increment_spliter_5, self).__init__()
+        # add CrossAttentionLayer
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        # add RotaryPositionalEmbedding
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+
+        # others
+        self.emb_dim = emb_dim
+        self.lin_increment= nn.Linear(1, emb_dim).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        # blocks with trained dropout and sckit connections
+        self.down_block = nn.Sequential(
+            ImprovedBlock(234, 256, 0.3),
+            ImprovedBlock(256, 128, 0.3),
+            ImprovedBlock(128, 64, 0.3),
+            ImprovedBlock(64, 32, 0.3),
+            ImprovedBlock(32, 16, 0.3),
+            ImprovedBlock(16, 8, 0.3),
+            ImprovedBlock(8, 4, 0.3)
+        ).to(device)
+
+        self.lin_final = nn.Linear(4, 1).to(device)
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+
+        # increment block
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment =  nn.LeakyReLU()(increment)
+
+        # Use RotaryPositionalEmbedding
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+        # Apply CrossAttentionLayer text_hidden_states and increment
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
+        # normalise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        prior_trained = self.lin_start(prior_embeds)
+        cross_prior_rise = self.cross_attention(prior_trained, increment)
+
+        cross_due_text_prior = self.cross_attention(cross_text_rise, cross_prior_rise)
+
+        # concat block
+        concat_data = torch.concat([text_hidden_states,
+                                    prior_trained,
+                                    increment,
+                                    cross_prior_rise,
+                                    cross_text_rise,
+                                    cross_due_text_prior
+                                    ],
+                                    axis=1)
+        #concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
+
+        # encode_block with trained dropout and sckit connections
+        out = self.down_block(concat_data.permute(0, 2, 1))
+
+        # next predicted prior_embeds
+        out = self.lin_final(out).permute(0, 2, 1)
+        return out
+
+
+
+
 class Increment_spliter_6(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
         super(Increment_spliter_6, self).__init__()
@@ -378,7 +442,7 @@ class Increment_spliter_6(nn.Module):
         self.emb_dim = emb_dim
         self.increment_block = ImprovedBlock(1, emb_dim, 0.3).to(device)
         self.prior_block = ImprovedBlock(emb_dim, emb_dim, 0.3).to(device)
-        
+
         # blocks with trained dropout and sckit connections
         self.down_block = nn.Sequential(
             ImprovedBlock(234, 256, 0.3),
