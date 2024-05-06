@@ -201,7 +201,7 @@ class TransformationRotationLoss(nn.Module):
         u_vec = torch.ones(vec_1.shape).to(vec_1.device)
         zer_target = torch.zeros(vec_1.shape).to(vec_1.device)
 
-        I = torch.eye(vec_1.shape[1]).to(vec_1.device)
+        I = torch.eye(vec_1.shape).to(vec_1.device)
 
 
         # Apply the transformation to target
