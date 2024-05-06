@@ -366,9 +366,10 @@ class Increment_spliter_5(nn.Module):
         return out
 
 
+
 class Increment_spliter_5_1(nn.Module):
     def __init__(self, emb_dim, max_seq_len, device='cpu'):
-        super(Increment_spliter_5, self).__init__()
+        super(Increment_spliter_5_1, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         # add RotaryPositionalEmbedding
@@ -411,13 +412,14 @@ class Increment_spliter_5_1(nn.Module):
 
         # concat block
         concat_data = torch.concat([text_hidden_states,
-                                    prior_trained,
+                                    prior_trained, # prior_embeds
                                     increment,
                                     cross_prior_rise,
                                     cross_text_rise,
                                     cross_due_text_prior
                                     ],
                                     axis=1)
+        
         #concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
 
         # encode_block with trained dropout and sckit connections
@@ -465,10 +467,13 @@ class Increment_spliter_6(nn.Module):
         # Apply CrossAttentionLayer text_hidden_states and increment
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
 
-        rise_m = rise.unsqueeze(1).repeat(1, 1, self.emb_dim)
+        #rise_m = rise.unsqueeze(1).repeat(1, 1, self.emb_dim)
         # multiply on rise_m
-        prior_embeds_m = prior_embeds*rise_m
-        prior_trained = self.prior_block(prior_embeds_m)
+        #prior_embeds_m = prior_embeds*rise_m
+        #prior_trained = self.prior_block(prior_embeds_m)
+        # normalise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        prior_trained = self.prior_block(prior_embeds)
 
 
         cross_prior_rise = self.cross_attention(prior_trained, increment)
