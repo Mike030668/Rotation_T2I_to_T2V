@@ -404,7 +404,7 @@ class Increment_spliter_5_1(nn.Module):
         cross_text_rise = self.cross_attention(text_hidden_states, increment)
 
         # normalise espessialy for regress
-        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        #prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         prior_trained = self.lin_start(prior_embeds)
         cross_prior_rise = self.cross_attention(prior_trained, increment)
 
@@ -420,7 +420,7 @@ class Increment_spliter_5_1(nn.Module):
                                     ],
                                     axis=1)
         
-        #concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
 
         # encode_block with trained dropout and sckit connections
         out = self.down_block(concat_data.permute(0, 2, 1))
@@ -472,7 +472,7 @@ class Increment_spliter_6(nn.Module):
         #prior_embeds_m = prior_embeds*rise_m
         #prior_trained = self.prior_block(prior_embeds_m)
         # normalise espessialy for regress
-        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        #prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
         prior_trained = self.prior_block(prior_embeds)
 
 
@@ -489,6 +489,7 @@ class Increment_spliter_6(nn.Module):
                                     cross_due_text_prior
                                     ],
                                     axis=1)
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
 
         # encode_block with trained dropout and sckit connections
         out = self.down_block(concat_data.permute(0, 2, 1))
