@@ -268,3 +268,58 @@ class CombinedLoss_cos_trans_I(nn.Module):
 
         return self.weight_rote * rotation_loss, self.weight_mse * mse_loss
     
+
+#########################################################
+class TransformLoss(nn.Module):
+    def __init__(self, weight_rote=0.5, weight_mse=0.5, alpha = 1, betta = 1):
+        super(TransformLoss, self).__init__()
+        self.rotation_vectors = RotationVectors()
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.alpha = alpha
+        self.betta = betta
+        self.weight_rote = weight_rote
+        self.weight_mse = weight_mse
+
+    def forward(self, vec_1, vec_2):
+
+        mask = torch.norm(vec_1, dim=-1, keepdim=True) > 1e-8
+        vec_1 = vec_1[mask.squeeze(1)]
+        vec_2 = vec_2[mask.squeeze(1)]
+
+
+        # Calculate angle and unit vectors
+        a = self.rotation_vectors.angle(vec_1, vec_2)
+        n1 = self.rotation_vectors.unit_vector(vec_1)
+        n2 = self.rotation_vectors.unit_vector(vec_2 - (n1 * (n1 * vec_2).sum(dim=1, keepdim=True)))
+
+        # Calculate rotation transformation excluding the identity matrix component
+        sin_a = torch.sin(a).unsqueeze(-1).unsqueeze(-1)
+        cos_a_minus_1 = (torch.cos(a) - 1).unsqueeze(-1).unsqueeze(-1)
+        n2n1T = n2.unsqueeze(2) * n1.unsqueeze(1)
+        n1n2T = n1.unsqueeze(2) * n2.unsqueeze(1)
+        n1n1T = n1.unsqueeze(2) * n1.unsqueeze(1)
+        n2n2T = n2.unsqueeze(2) * n2.unsqueeze(1)
+
+        transform_a = (n2n1T - n1n2T) * sin_a
+        transform_b = (n1n1T + n2n2T) * cos_a_minus_1
+        transform = self.alpha*transform_a + self.betta*transform_b
+        u_vec = torch.ones(vec_1.shape).to(vec_1.device)
+        zer_target = torch.zeros(vec_1.shape).to(vec_1.device)
+        one_target = torch.ones(vec_1.shape).to(vec_1.device)
+        I = torch.eye(vec_1.shape[-1]).unsqueeze(0).repeat(vec_1.shape[0],1,1).to(vec_1.device)
+
+
+        # Apply the transformation to target
+        u_transform = torch.bmm(transform, u_vec.unsqueeze(-1)).squeeze(-1)
+        #u_transform_b = torch.bmm(transform_b, u_vec.unsqueeze(-1)).squeeze(-1)
+        u_transform_I = torch.bmm(I, u_vec.unsqueeze(-1)).squeeze(-1)
+
+
+        # Calculate MSE loss
+        loss_u = torch.mean(self.mse_loss(u_transform, zer_target), dim=0)
+        loss_I = torch.mean(self.mse_loss(u_transform_I, one_target), dim=0)
+    
+        loss_u = torch.nan_to_num(loss_u, nan=0.0, posinf=0.1, neginf = -0.1)
+        loss_I = torch.nan_to_num(loss_I, nan=0.0, posinf=0.1, neginf = -0.1)
+
+        return self.weight_rote * loss_u, self.weight_mse * loss_I
