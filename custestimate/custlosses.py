@@ -200,14 +200,13 @@ class TransformationRotationLoss(nn.Module):
         transform_b = (n1n1T + n2n2T) * cos_a_minus_1
         u_vec = torch.ones(vec_1.shape).to(vec_1.device)
         zer_target = torch.zeros(vec_1.shape).to(vec_1.device)
-
-        I = torch.eye(vec_1.shape).to(vec_1.device)
+        one_target = torch.ones(vec_1.shape).to(vec_1.device)
+        I = torch.eye(vec_1.shape[-1]).unsqueeze(0).repeat(vec_1.shape[0],1,1).to(vec_1.device)
 
 
         # Apply the transformation to target
         u_transform_a = torch.bmm(transform_a, u_vec.unsqueeze(-1)).squeeze(-1)
         u_transform_b = torch.bmm(transform_b, u_vec.unsqueeze(-1)).squeeze(-1)
-
         u_transform_I = torch.bmm(I, u_vec.unsqueeze(-1)).squeeze(-1)
 
 
@@ -215,7 +214,7 @@ class TransformationRotationLoss(nn.Module):
         loss_a = self.alpha*self.mse_loss(u_transform_a, zer_target)
         loss_b = self.betta*self.mse_loss(u_transform_b, zer_target)
         
-        loss = self.mse_loss(u_transform_I, zer_target) + loss_a + loss_b
+        loss = self.mse_loss(u_transform_I, one_target) + loss_a + loss_b #
 
         loss = torch.mean(loss, dim=0)
         loss = torch.nan_to_num(loss, nan=0.0, posinf=0.1, neginf = -0.1)
