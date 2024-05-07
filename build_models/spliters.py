@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from  build_models.special_layers import CrossAttentionLayer, RotaryPositionalEmbedding
 from  build_models.special_layers import ImprovedBlock, ImprovedBlock_next
+from  utils.constats import EMB_DIM, MAX_SEQ_LEN_K22
 
 class Increment_spliter_next(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_next, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -61,7 +62,7 @@ class Increment_spliter_next(nn.Module):
 
 
 class Increment_spliter(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -122,7 +123,7 @@ class Increment_spliter(nn.Module):
 
 
 class Simple_spliter(nn.Module):
-    def __init__(self, emb_dim):
+    def __init__(self, emb_dim = EMB_DIM):
           super(Simple_spliter, self).__init__()
           ### New layers:
           self.emb_dim = emb_dim

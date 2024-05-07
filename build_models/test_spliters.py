@@ -3,10 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from  build_models.special_layers import CrossAttentionLayer, RotaryPositionalEmbedding
 from  build_models.special_layers import ImprovedBlock, ImprovedBlock_next
+from  utils.constats import EMB_DIM, MAX_SEQ_LEN_K22
 
 
 class Increment_spliter_0(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_0, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -60,7 +61,7 @@ class Increment_spliter_0(nn.Module):
 
 
 class Increment_spliter_1(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_1, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -119,7 +120,7 @@ class Increment_spliter_1(nn.Module):
 
 
 class Increment_spliter_2(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_2, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -180,7 +181,7 @@ class Increment_spliter_2(nn.Module):
         return out
 
 class Increment_spliter_3(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_3, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -242,7 +243,7 @@ class Increment_spliter_3(nn.Module):
 
 
 class Increment_spliter_4(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_4, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -305,7 +306,7 @@ class Increment_spliter_4(nn.Module):
 
 
 class Increment_spliter_5(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_5, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -368,7 +369,7 @@ class Increment_spliter_5(nn.Module):
 
 
 class Increment_spliter_5_1(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_5_1, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -433,7 +434,7 @@ class Increment_spliter_5_1(nn.Module):
 
 
 class Increment_spliter_6(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(Increment_spliter_6, self).__init__()
         # add CrossAttentionLayer
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
@@ -500,7 +501,7 @@ class Increment_spliter_6(nn.Module):
 
 
 class DualBranchSpliter(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
@@ -571,7 +572,7 @@ class DualBranchSpliter(nn.Module):
 
 
 class DualBranchSpliter_1(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter_1, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
@@ -647,7 +648,7 @@ class DualBranchSpliter_1(nn.Module):
 
 
 class DualBranchSpliter_up(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter_up, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
@@ -719,7 +720,7 @@ class DualBranchSpliter_up(nn.Module):
 
 
 class DualBranchSpliter_next_1(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter_next_1, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
@@ -787,7 +788,7 @@ class DualBranchSpliter_next_1(nn.Module):
 
 
 class DualBranchSpliter_next_2(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter_next_2, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
