@@ -23,7 +23,7 @@ class K22_T2V():
 
     def predict_regress_vectors(self, start_unclip: torch.float16, hidden_state: torch.float16,
                                 text_emb: torch.float16, increment:float, qty_vectors:int,
-                                rote_pow = 1, fix_text_emb = True, dim2norm = -1
+                                fix_text_emb = True, rote_pow = 1, dim2norm = -1
                                 ):
 
 
@@ -86,9 +86,9 @@ class K22_T2V():
 
         return pred_unclip_embs
 
-    def generate_frames(self, set_unclips: object,  negative_emb: object, height = 256, width = 256, num_inference_steps = 50, seed = 0):
+    def generate_frames(self, set_unclips: object,  negative_emb: object, height = 256, width = 256, 
+                        num_inference_steps = 50, seed = 0):
 
-        generator = torch.Generator().manual_seed(seed)
         gen_frames = []
         # generate from latent #####################################################
         for embeds in set_unclips:
@@ -96,7 +96,7 @@ class K22_T2V():
                                 image_embeds = embeds.squeeze(1),
                                 negative_image_embeds = negative_emb,
                                 num_inference_steps=num_inference_steps,
-                                generator = generator,
+                                generator = torch.Generator().manual_seed(seed),
                                 height=height,
                                 width=width)[0][0]
 
