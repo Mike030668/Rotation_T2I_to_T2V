@@ -404,7 +404,8 @@ class CombinedLoss_RT(nn.Module):
         self.weight_rote = weight_rote
         self.cos_way = cos_way
         self.dim_norm = dim_norm
-
+        self.alpha = alpha 
+        self.betta = betta
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
 
         device = pred_unclip.device
@@ -428,7 +429,7 @@ class CombinedLoss_RT(nn.Module):
 
 
 
-        if self.alfa or self.betta:
+        if self.alpha or self.betta:
             I_loss, RT_loss = self.trans_loss(diff_img, diff_unclip)  # Expected shape (None, 1280)
 
         return self.weight_rote * (cos_loss + RT_loss), self.weight_mse * (mse_loss + I_loss)
