@@ -394,7 +394,7 @@ class TransRoteLoss(nn.Module):
 
 
 class CombinedLoss_RT(nn.Module):
-    def __init__(self, weight_rote=0.5, weight_mse =0.5, alpha = 1.,  betta = 1., cos_way = -1, dim_norm = 1):
+    def __init__(self, weight_rote=0.5, weight_mse =0.5, alpha = 1.,  betta = 1., cos_way = -1, dim_norm = -1):
         super(CombinedLoss_base, self).__init__()
 
         self.mse_loss = nn.MSELoss(reduction='none')
@@ -426,7 +426,7 @@ class CombinedLoss_RT(nn.Module):
         mse_loss = self.mse_loss(diff_img, diff_unclip)  # Shape (None, 1, 1280)
         mse_loss = torch.mean(mse_loss, dim=0)#  # Reduce to Shape (None, 1)
 
-        
+
 
         if self.alfa or self.betta:
             I_loss, RT_loss = self.trans_loss(diff_img, diff_unclip)  # Expected shape (None, 1280)
