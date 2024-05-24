@@ -395,7 +395,7 @@ class TransRoteLoss(nn.Module):
 
 class CombinedLoss_RT(nn.Module):
     def __init__(self, weight_rote=0.5, weight_mse =0.5, alpha = 1.,  betta = 1., cos_way = -1, dim_norm = -1):
-        super(CombinedLoss_base, self).__init__()
+        super(CombinedLoss_RT, self).__init__()
 
         self.mse_loss = nn.MSELoss(reduction='none')
         self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
