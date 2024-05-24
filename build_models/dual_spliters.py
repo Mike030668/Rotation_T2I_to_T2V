@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from  build_models.special_layers import CrossAttentionLayer, RotaryPositionalEmbedding
 from  build_models.special_layers import ImprovedBlock, ImprovedBlock_next
+from  utils.constats import EMB_DIM, MAX_SEQ_LEN_K22
 
 
 
 class DualBranchSpliter(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
@@ -74,7 +75,7 @@ class DualBranchSpliter(nn.Module):
 
 
 class DualBranchSpliter_next(nn.Module):
-    def __init__(self, emb_dim, max_seq_len, device='cpu'):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(DualBranchSpliter_next, self).__init__()
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
