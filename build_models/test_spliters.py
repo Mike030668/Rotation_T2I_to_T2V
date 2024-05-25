@@ -860,6 +860,7 @@ class DualBranchSpliter_next_2(nn.Module):
 class IncrementSpliterSA(nn.Module):
     def __init__(self, emb_dim=EMB_DIM, max_seq_len=MAX_SEQ_LEN_K22, device='cpu'):
         super(IncrementSpliterSA, self).__init__()
+        self.emb_dim = emb_dim
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.csa = ConsistentSelfAttentionBase(emb_dim).to(device)
@@ -914,6 +915,7 @@ class IncrementSpliterSA(nn.Module):
 class IncrementSpliterSAT(nn.Module):
     def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
         super(IncrementSpliterSAT, self).__init__()
+        self.emb_dim = emb_dim
         self.consistent_self_attention = ConsistentSelfAttentionTile(emb_dim, sampling_rate=0.5, tile_size=5).to(device)
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
