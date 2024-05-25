@@ -103,3 +103,58 @@ class ImprovedBlock_next(nn.Module):
             identity = self.identity_mapping(identity)
         out += identity  # Residual connection
         return out
+
+class ConsistentSelfAttentionBase(nn.Module):
+    def __init__(self, emb_dim):
+        super(ConsistentSelfAttentionBase, self).__init__()
+        self.self_attn = nn.MultiheadAttention(emb_dim, num_heads=8, dropout=0.3)
+        self.norm = nn.LayerNorm(emb_dim)
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x):
+        attn_output, _ = self.self_attn(x, x, x)
+        x = x + self.dropout(attn_output)
+        x = self.norm(x)
+        return x
+
+
+
+class ConsistentSelfAttentionTile(nn.Module):
+    def __init__(self, emb_dim, sampling_rate, tile_size):
+        super(ConsistentSelfAttentionTile, self).__init__()
+        self.sampling_rate = sampling_rate
+        self.tile_size = tile_size
+        self.linear_q = nn.Linear(emb_dim, emb_dim)
+        self.linear_k = nn.Linear(emb_dim, emb_dim)
+        self.linear_v = nn.Linear(emb_dim, emb_dim)
+        self.emb_dim = emb_dim
+
+    def forward(self, image_features):
+        B, N, C = image_features.size()
+        output = torch.zeros(B, N, C, device=image_features.device)
+        count = torch.zeros(B, N, C, device=image_features.device)
+        W = self.tile_size
+
+        for t in range(0, N - W + 1):
+            tile_features = image_features[:, t:t + W, :]
+
+            # Adjust the reshaping operation to match the dimensions correctly
+            reshape_feature = tile_features.reshape(B, W, C).repeat(1, N // W + 1, 1).reshape(B, (N // W + 1) * W, C)
+
+            sampled_tokens = reshape_feature[:, torch.randperm((N // W + 1) * W)[:int(self.sampling_rate * (N // W + 1) * W)], :]
+
+            token_KV = torch.cat([sampled_tokens, tile_features], dim=1)
+            token_Q = tile_features
+
+            X_q = self.linear_q(token_Q)
+            X_k = self.linear_k(token_KV)
+            X_v = self.linear_v(token_KV)
+
+            attention_weights = F.softmax(torch.bmm(X_q, X_k.permute(0, 2, 1)), dim=-1)
+            attention_output = torch.bmm(attention_weights, X_v)
+
+            output[:, t:t + W, :] += attention_output
+            count[:, t:t + W, :] += 1
+
+        output = output / count
+        return output
