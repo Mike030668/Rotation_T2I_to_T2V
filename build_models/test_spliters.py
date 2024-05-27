@@ -910,6 +910,59 @@ class IncrementSpliterSA(nn.Module):
         out = self.lin_final(out).permute(0, 2, 1)
         return out
 
+class IncrementSpliterSAI(nn.Module):
+    def __init__(self, emb_dim=EMB_DIM, max_seq_len=MAX_SEQ_LEN_K22, device='cpu'):
+        super(IncrementSpliterSA, self).__init__()
+        self.emb_dim = emb_dim
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+        self.csa = ConsistentSelfAttentionBase(emb_dim).to(device)
+        self.lin_increment = nn.Linear(1, emb_dim).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+
+        self.block_1 = ImprovedBlock(236, 256, 0.3).to(device)
+        self.block_2 = ImprovedBlock(256, 128, 0.3).to(device)
+        self.block_3 = ImprovedBlock(128, 64, 0.3).to(device)
+        self.block_4 = ImprovedBlock(64, 32, 0.3).to(device)
+        self.block_5 = ImprovedBlock(32, 16, 0.3).to(device)
+        self.block_6 = ImprovedBlock(16, 8, 0.3).to(device)
+        self.block_7 = ImprovedBlock(8, 4, 0.3).to(device)
+
+        self.lin_final = nn.Linear(4, 1).to(device)
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment = nn.LeakyReLU()(increment)
+
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
+        prior_embeds = torch.nn.functional.normalize(prior_embeds, p=2.0, dim=-1)
+        cross_text_prior = self.cross_attention(prior_embeds, increment)
+
+        concat_base = torch.concat([text_hidden_states, prior_embeds, increment], axis=1)
+        self_attn = self.csa(concat_base)
+
+        concat_data = torch.concat([increment,
+                                    text_hidden_states,
+                                    prior_embeds,
+                                    cross_text_prior,
+                                    cross_text_rise,
+                                    self_attn
+                                    ], axis=1)
+        
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim=-1)
+
+        out = self.block_1(concat_data.permute(0, 2, 1))
+        out = self.block_2(out)
+        out = self.block_3(out)
+        out = self.block_4(out)
+        out = self.block_5(out)
+        out = self.block_6(out)
+        out = self.block_7(out)
+
+        out = self.lin_final(out).permute(0, 2, 1)
+        return out
 
 
 class IncrementSpliterSAT(nn.Module):
