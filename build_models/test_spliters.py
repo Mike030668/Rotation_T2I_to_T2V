@@ -1099,3 +1099,70 @@ class DualBranchSpliterSA(nn.Module):
 
         out = self.down_block_fin(concat_out).permute(0, 2, 1)
         return out
+
+
+
+class Increment_spliter_next_SA(nn.Module):
+    def __init__(self, emb_dim = EMB_DIM, max_seq_len = MAX_SEQ_LEN_K22, device='cpu'):
+        super(Increment_spliter_next_SA, self).__init__()
+        self.emb_dim = emb_dim
+        self.device = device
+
+        self.csa = ConsistentSelfAttentionBase(emb_dim).to(device)
+        # add CrossAttentionLayer
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        # add RotaryPositionalEmbedding
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+
+        # others
+        self.lin_increment= nn.Linear(1, emb_dim).to(device)
+        self.dropout = nn.Dropout(0.3).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        self.down_block = nn.Sequential(
+            ImprovedBlock_next(235, 256, nn.GELU),
+            ImprovedBlock_next(256, 128, nn.GELU),
+            ImprovedBlock_next(128, 64, nn.GELU),
+            ImprovedBlock_next(64, 32, nn.GELU),
+            ImprovedBlock_next(32, 16, nn.GELU),
+            ImprovedBlock_next(16, 8, nn.GELU),
+            ImprovedBlock_next(8, 4, nn.GELU)
+        ).to(device)
+
+        self.lin_final = nn.Linear(4, 1).to(device)
+
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment =  nn.LeakyReLU()(increment)
+
+        # Use RotaryPositionalEmbedding
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+        # Apply CrossAttentionLayer text_hidden_states and increment
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
+        # nomolise espessialy for regress
+        prior_embeds =  torch.nn.functional.normalize(prior_embeds, p=2.0, dim = -1)
+        prior_trained = self.lin_start(prior_embeds)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
+
+        concat_base = torch.concat([text_hidden_states,
+                                    prior_embeds,
+                                    increment], axis=1)
+        
+        self_attn = self.csa(concat_base)
+
+        concat_data = torch.concat([text_hidden_states,
+                                    prior_embeds,
+                                    cross_text_prior,
+                                    cross_text_rise,
+                                    self_attn
+                                    ], axis=1)
+
+
+        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim = -1)
+        out = self.down_block(concat_data.permute(0, 2, 1))
+
+        # Use lin_final for the last step
+        out = self.lin_final(out).permute(0, 2, 1)
+        return out
