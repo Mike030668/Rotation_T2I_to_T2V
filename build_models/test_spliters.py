@@ -912,7 +912,7 @@ class IncrementSpliterSA(nn.Module):
 
 class IncrementSpliterSAI(nn.Module):
     def __init__(self, emb_dim=EMB_DIM, max_seq_len=MAX_SEQ_LEN_K22, device='cpu'):
-        super(IncrementSpliterSA, self).__init__()
+        super(IncrementSpliterSAI, self).__init__()
         self.emb_dim = emb_dim
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
