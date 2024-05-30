@@ -120,13 +120,13 @@ class TakeTgif():
 
                 if len(frames) < self._take_min:
                     if error == 1: error = 0
-                    else: print(f"\rSmall gif {id_movi}", end="")
+                    else: print(f"\rSmall gif {id_movi} with {len(frames)} frames", end="")
 
                 # select movi not shot than take_min
                 else:
                     # select movi not low than MIN_SIZE
                     if width < self._min_size  or  height < self._min_size:
-                        print(f'\rMovi {id_movi} have low H or W', end="")
+                        print(f'\rMovi {id_movi} have low H_{height} or W_{width}', end="")
                         low_movi = 1
 
                     if len(frames) > self.take_max and not low_movi:
@@ -149,13 +149,12 @@ class TakeTgif():
 
                     if not bad_movi and not low_movi:
                         # save frames and make
-                        for i in range(len(frames)):
+                        for idx in range(len(frames)):
                             if len(dir_image):
-                                id_frame = i
-                                img_path = os.path.join(dir_image, f'{id_movi}_{id_frame}.jpg')
+                                img_path = os.path.join(dir_image, f'{id_movi}_{idx}.jpg')
                                 frames[i].save(img_path)
 
-                            pil_df.append([id_movi, f"{width},{height}", id_frame, [width, height], caption, img_path, self.patterns_to_search, url])
+                            pil_df.append([id_movi, f"{width},{height}", idx, [width, height], caption, img_path, self.patterns_to_search, url])
 
                         select_movis += 1
                         print(f"\rMovi {id_movi} have len = {len(frames)} take all move with W_{width} x H_{height} selected_{select_movis}\n")
