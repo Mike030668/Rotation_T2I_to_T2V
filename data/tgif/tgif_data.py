@@ -40,7 +40,7 @@ class TakeTgif():
         self.patterns_to_search = patterns_to_search
       
         print("self.train_df ", self.train_df.shape)  
-        select_df = self.train_df[self.train_df[0].isin(pass_lst)] if pass_lst else self.train_df
+        select_df = self.train_df[~self.train_df.index.isin(pass_lst)] if pass_lst else self.train_df
         print("select_df ", select_df.shape)  
 
         if self.patterns_to_search == 'random':
