@@ -45,11 +45,11 @@ class TakeTgif():
 
         if self.patterns_to_search == 'random':
             
-            rand_gif_df = select_df.sample(qty) if qty else select_df
-            print("rand_gif_df ", rand_gif_df.shape) 
+            self.rand_gif_df = select_df.sample(qty) if qty else select_df
+            print("rand_gif_df ", self.rand_gif_df.shape) 
 
 
-            self.train_vidxs, self.train_corpus = list(rand_gif_df.index.values), list(rand_gif_df[1])
+            self.train_vidxs, self.train_corpus = list(self.rand_gif_df.index.values), list(self.rand_gif_df[1])
             self.matchs = [(id, text) for id, text in zip(self.train_vidxs, self.train_corpus)]
 
         elif type(self.patterns_to_search) == list :
@@ -98,8 +98,8 @@ class TakeTgif():
                 low_movi = 0
                 error = 0
                 id_movi = self.matchs[id_matchs][0]
-                caption = self.train_df.loc[id_movi][1]
-                url =  self.train_df.loc[id_movi][0]
+                caption = self.rand_gif_df.loc[id_movi][1]
+                url =  self.rand_gif_df.loc[id_movi][0]
 
                 try:
                     #download gif
@@ -189,7 +189,7 @@ class TakeTgif():
         
         saved_movis = 1
         for id_movi in id_movies:
-            url =  self.train_df.loc[id_movi][0]
+            url =  self.rand_gif_df.loc[id_movi][0]
             len_movi = self.df[self.df["id_movi"] == id_movi].shape[0]
             #download gif
             with open(path_gif, 'wb') as f:
