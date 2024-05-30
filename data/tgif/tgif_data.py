@@ -150,9 +150,10 @@ class TakeTgif():
                     if not bad_movi and not low_movi:
                         # save frames and make
                         for idx in range(len(frames)):
+                            img_path = os.path.join(dir_image, f'{id_movi}_{idx}.jpg')
+                            
                             if len(dir_image):
-                                img_path = os.path.join(dir_image, f'{id_movi}_{idx}.jpg')
-                                frames[i].save(img_path)
+                               frames[idx].save(img_path)
 
                             pil_df.append([id_movi, f"{width},{height}", idx, [width, height], caption, img_path, self.patterns_to_search, url])
 
