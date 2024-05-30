@@ -30,19 +30,24 @@ class TakeTgif():
 
     def selector(self,
                  qty = None,
-                 patterns_to_search = 'random',                     
+                 patterns_to_search = 'random', 
+                 pass_lst = [],                    
         ):
         """
 
         
         """
         self.patterns_to_search = patterns_to_search
+      
+        print("self.train_df ", self.train_df.shape)  
+        select_df = self.train_df[self.train_df[0].isin(pass_lst)] if pass_lst else self.train_df
+        print("select_df ", select_df.shape)  
 
         if self.patterns_to_search == 'random':
-            if qty:
-               rand_gif_df = self.train_df.sample(qty)
-            else:
-               rand_gif_df = self.train_df
+            
+            rand_gif_df = select_df.sample(qty) if qty else select_df
+            print("rand_gif_df ", rand_gif_df.shape) 
+
 
             self.train_vidxs, self.train_corpus = list(rand_gif_df.index.values), list(rand_gif_df[1])
             self.matchs = [(id, text) for id, text in zip(self.train_vidxs, self.train_corpus)]
@@ -59,7 +64,7 @@ class TakeTgif():
             file_path : str,
             path_tmp = '/content',
             save_each = 10,
-            dir_image = ''
+            dir_image = '',
             ):
 
             """
