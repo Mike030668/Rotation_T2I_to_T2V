@@ -207,7 +207,7 @@ class Encode_Kand22():
 
                 for id_movi in tqdm(movis_ids, unit = " movi "):
 
-                    movi_name = movi_df[movi_df["video_id"] == id_movi].paths[0]
+                    movi_name = movi_df[movi_df["video_id"] == id_movi].paths.values[0]
                     file_path = movi_dir + movi_name
                     pil_set = self.movi2pilset(file_path, max_frame)
                     qty_frames = len(pil_set)
