@@ -4,6 +4,7 @@ from transformers import CLIPVisionModelWithProjection
 import torch
 import pandas as pd
 from tqdm.notebook import tqdm
+import cv2
 
 
 class Encode_Kand22():
@@ -99,7 +100,7 @@ class Encode_Kand22():
                      height: int,
                      width: int,
                      pil_df : pd.DataFrame,
-                     max_farme: int,
+                     max_frame: int,
                      path_to : str,
                      save_each = 25,
                      img_dir = "/content/images/"
@@ -119,9 +120,9 @@ class Encode_Kand22():
 
                   qty_frames = len(frames_ids)
 
-                  if qty_frames > max_farme:
+                  if qty_frames > max_frame:
                       # for normal way take before last
-                      frames_pathes = frames_pathes[:max_farme]
+                      frames_pathes = frames_pathes[:max_frame]
 
                   image_embeds = []
                   ids_frame = []
@@ -156,3 +157,94 @@ class Encode_Kand22():
                      torch.save(all_data, path_to)
 
               torch.save(all_data, path_to)
+              
+
+      def movi2pilset(self, file_path:str, max_len:int):
+            # Open the video
+            cap = cv2.VideoCapture(file_path)
+
+            pil_set = []
+            # Now we start
+            while(cap.isOpened()):
+                ret, frame = cap.read()
+                # Avoid problems when video finish
+                if ret==True:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    pil_set.append(PIL.Image.fromarray(frame))
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                else:
+                    break
+
+            cap.release()
+            cv2.destroyAllWindows()
+
+            if max_len:
+                if len(pil_set)>max_len:
+                    k = len(pil_set)//max_len + 1
+                    pil_set = pil_set[::k]
+
+            return pil_set
+      
+
+      def encode_movi(self,
+                height: int,
+                width: int,
+                movi_df : pd.DataFrame,
+                max_frame: int,
+                path_to : str,
+                save_each = 25,
+                movi_dir = "/content/images/"
+                ):
+    
+            if type(movi_df) == str:
+                movi_df = pd.read_csv(movi_df)
+
+            movis_ids = movi_df["video_id"].unique()
+            all_data = []
+
+            with torch.no_grad(): # prepare data for model and losses with no_grad
+
+                for id_movi in tqdm(movis_ids, unit = " movi "):
+
+                    movi_name = movi_df[movi_df["video_id"] == id_movi].paths[0]
+                    file_path = movi_dir + movi_name
+                    pil_set = self.movi2pilset(file_path, max_frame)
+                    qty_frames = len(pil_set)
+
+                    if qty_frames > max_frame:
+                        # for normal way take before last
+                        pil_set = pil_set[:max_frame]
+
+                    image_embeds = []
+                    ids_frame = []
+
+                    for id_frame, pil_image in enumerate(pil_set):
+                        
+                        image_embeds.append(self.get_image_embeds(pil_image,
+                                                    to_square=True,
+                                                    recize=(height, width)).cpu())
+                        # take label frames
+                        ids_frame.append(id_frame)
+
+
+                    if len(ids_frame):
+                        caption = movi_df[movi_df["video_id"] == id_movi].caption_movi.values[0]
+
+                        text_embeds, last_hidden_states = self.get_text_embeds(caption)
+
+                        dict_movi = dict()
+                        dict_movi['id_movi'] = id_movi
+                        dict_movi['img_embeds'] = image_embeds
+                        dict_movi['text_embed'] = text_embeds.cpu()
+                        dict_movi['last_hidden_state'] = last_hidden_states.cpu()
+                        dict_movi['unclip_embed'] = self.get_unclip_embeds(caption).cpu()
+                        dict_movi['ids_frames'] = ids_frame
+                        del(image_embeds, text_embeds, last_hidden_states)
+                        self.flush_memory()
+                        all_data.append(dict_movi)
+
+                    if len(all_data) and not len(all_data) % save_each:
+                        torch.save(all_data, path_to)
+
+                torch.save(all_data, path_to)
