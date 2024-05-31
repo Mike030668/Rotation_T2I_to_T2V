@@ -101,7 +101,8 @@ class Encode_Kand22():
                      pil_df : pd.DataFrame,
                      max_farme: int,
                      path_to : str,
-                     save_each = 25
+                     save_each = 25,
+                     img_dir = "/content/images/"
                      ):
           
           if type(pil_df) == str:
@@ -127,7 +128,7 @@ class Encode_Kand22():
 
                   for i, path in enumerate(frames_pathes):
                       
-                      pil_image = PIL.Image.open(path)
+                      pil_image = PIL.Image.open(img_dir + path)
                       image_embeds.append(self.get_image_embeds(pil_image,
                                                   to_square=True,
                                                   recize=(height, width)).cpu())
