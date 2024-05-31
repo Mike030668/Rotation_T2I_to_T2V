@@ -189,7 +189,7 @@ class TakeTgif():
         
         saved_movis = 1
         for id_movi in id_movies:
-            url =  self.rand_gif_df.loc[id_movi][0]
+            url =  self.train_df.loc[id_movi][0]
             len_movi = self.df[self.df["id_movi"] == id_movi].shape[0]
             #download gif
             with open(path_gif, 'wb') as f:
