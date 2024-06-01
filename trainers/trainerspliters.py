@@ -128,7 +128,7 @@ class RoteTrainer():
                      learning_rate = 1e-03,
                      update_lr = False,
                      reset_losses_acc = False,
-                     suff_direct =  True,
+                     suff_direct =  False,
                      add_back_train = False,
                      add_rote_train = False,
                      add_diff_train = False,
@@ -239,7 +239,7 @@ class RoteTrainer():
                         # take random ids in ids_frame[1:] because ids_frame[0] will first
                         rand_ids = [0] + list(np.random.choice(np.arange(1, qty_frames-1),
                                                                 d_batch-1, replace=False))
-                        rand_ids = rand_ids + [qty_frames-1]
+                        rand_ids = sorted(rand_ids + [qty_frames - 1])  # Sort the selected indices
                         # select rand_ids labels and image_embeds
                         image_embeds = torch.concat([image_embeds[i] for i in rand_ids]).unsqueeze(dim=1)
                         labels = np.array([ids_frame[i] for i in rand_ids])

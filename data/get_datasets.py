@@ -1,7 +1,7 @@
 # Collected prepared pytorch datasets linls for loading
 
-
 TGIF_DATASETS = {"both_ways": { "300_pxls_1" : "1u3vEgamCwj-Au6xk6beWpkcVMT7UAWgB",  # file_name bothway_embed_data_min_300_1.pth  
+                                "300_pxls_2" : "1ExVnjIBEDH99NLZ0VAijeCNOC3LYKl33", 
                                 "500_pxls_1" : "1YHHzESWX6SfUn3In19UwySDUW1Hvv9w6",  # file_name bothway_embed_data_min_500_1.pth  
                                 "discription" : " embeddeed with Kand_22 torch dataset includ text_embedd and last hiden state"
                                
@@ -14,3 +14,13 @@ TGIF_DATASETS = {"both_ways": { "300_pxls_1" : "1u3vEgamCwj-Au6xk6beWpkcVMT7UAWg
 }
 
 }  
+
+
+MSRVTT_DATASETS = {"both_ways": { "kaggle_rand_2000" : "1H9C-PfZ61OBM-desjte5AKmW6QI28uNa",  # file_name bothway_embed_data_min_300_1.pth  
+                                "discription" : " embeddeed with Kand_22 torch dataset includ text_embedd and last hiden state"
+                               
+
+}, 
+
+}  
+
