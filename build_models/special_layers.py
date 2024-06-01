@@ -104,6 +104,33 @@ class ImprovedBlock_next(nn.Module):
         out += identity  # Residual connection
         return out
 
+
+
+class ConsistentSelfAttention(nn.Module):
+    def __init__(self, emb_dim, num_heads=8, dropout=0.1):
+        super(ConsistentSelfAttention, self).__init__()
+        self.self_attn = nn.MultiheadAttention(emb_dim, num_heads=num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(emb_dim)
+        self.norm2 = nn.LayerNorm(emb_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.ffn = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            nn.GELU(),
+            nn.Linear(4 * emb_dim, emb_dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        attn_output, _ = self.self_attn(x, x, x)
+        x = x + self.dropout(attn_output)
+        x = self.norm1(x)
+        ffn_output = self.ffn(x)
+        x = x + self.dropout(ffn_output)
+        x = self.norm2(x)
+        return x
+
+
+
 class ConsistentSelfAttentionBase(nn.Module):
     def __init__(self, emb_dim):
         super(ConsistentSelfAttentionBase, self).__init__()
@@ -158,3 +185,5 @@ class ConsistentSelfAttentionTile(nn.Module):
 
         output = output / count
         return output
+    
+
