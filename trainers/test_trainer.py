@@ -576,59 +576,61 @@ class RoteTrainer():
                                         next_image_embs.append(torch.clone(img_embs[:d_batch])[config_diff_back['id_img_delta']])
                                         next_increments.append((-1)*torch.tensor(config_diff_back['norm_delta']).unsqueeze(1))
 
-                                    # collect torch.concat
-                                    take_base_unclip_embs = torch.concat(take_base_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    take_text_hid_states = torch.concat(take_text_hid_states)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    take_text_embs = torch.concat(take_text_embs)[s_idx].to(self.DEVICE)
 
-                                    next_unclip_embs = torch.concat(next_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    next_base_img_embs = torch.concat(next_base_img_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    next_image_embs = torch.concat(next_image_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    next_increments = torch.concat(next_increments)[s_idx].to(self.DEVICE).to(torch.float32)
+                                    if (not way and diff_norm) or (way and diff_back):
+                                        # collect torch.concat
+                                        take_base_unclip_embs = torch.concat(take_base_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_text_hid_states = torch.concat(take_text_hid_states)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_text_embs = torch.concat(take_text_embs)[s_idx].to(self.DEVICE)
 
-
-                                    # get rotation vectors
-                                    R_marixes = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1), next_unclip_embs.squeeze(1))
-
-                                    cos_sim = torch.cosine_similarity(take_base_unclip_embs, take_text_embs.to(self.DEVICE), dim = -1)
-                                    next_text_hid_states = self.RV.cosin_rotate(take_text_hid_states, cos_sim.to(torch.float32).to(self.DEVICE), R_marixes,  power = self.pow_rote)
-
-                                    # dif predict from base predict
-                                    next_pred_unclip_embs = self.model(
-                                        text_hidden_states = next_text_hid_states,
-                                        prior_embeds = next_unclip_embs,
-                                        rise = next_increments,
-                                        )
-
-                                    # combi_loss
-                                    rote_loss, mse_loss = self.combi_loss(next_base_img_embs, next_image_embs,
-                                                                                            next_unclip_embs, next_pred_unclip_embs)
-                                    weight_diff_loss = 0.5
-                                    if len(self.hist["acc"]):
-                                        weight_diff_loss = np.mean(self.hist["acc"][-min(len(self.hist["acc"]), self.window):])
+                                        next_unclip_embs = torch.concat(next_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_base_img_embs = torch.concat(next_base_img_embs)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_image_embs = torch.concat(next_image_embs)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_increments = torch.concat(next_increments)[s_idx].to(self.DEVICE).to(torch.float32)
 
 
-                                    way_rote_loss += weight_diff_loss * rote_loss
-                                    way_mse_loss += weight_diff_loss * mse_loss
+                                        # get rotation vectors
+                                        R_marixes = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1), next_unclip_embs.squeeze(1))
 
-                                    # control NAN INF in loss
-                                    if torch.isnan(way_rote_loss).sum() or torch.isinf(way_rote_loss).sum():
-                                      print(f"\rMovi {id_movi} rote_loss_diff isnan or isinf, {type_ways[way]}_way")
-                                      self.logs["naninf_rote"].append(id_movi)
-                                      break
+                                        cos_sim = torch.cosine_similarity(take_base_unclip_embs, take_text_embs.to(self.DEVICE), dim = -1)
+                                        next_text_hid_states = self.RV.cosin_rotate(take_text_hid_states, cos_sim.to(torch.float32).to(self.DEVICE), R_marixes,  power = self.pow_rote)
 
-                                    # control NAN INF in loss
-                                    if torch.isnan(way_mse_loss).sum() or torch.isinf(way_mse_loss).sum():
-                                      print(f"\rMovi {id_movi} mse_loss_diff isnan or isinf, {type_ways[way]}_way")
-                                      self.logs["naninf_mse"].append(id_movi)
-                                      break
+                                        # dif predict from base predict
+                                        next_pred_unclip_embs = self.model(
+                                            text_hidden_states = next_text_hid_states,
+                                            prior_embeds = next_unclip_embs,
+                                            rise = next_increments,
+                                            )
 
-                                    del(take_text_embs, take_base_unclip_embs)
-                                    del(next_image_embs, next_base_img_embs, next_increments, next_text_hid_states)
-                                    del(take_text_hid_states,  next_unclip_embs)
-                                    del(pred_unclip_embs, next_pred_unclip_embs)
-                                    self.flush_memory()
-                                    print(f"\rWay_loss.backward on {id_m} step with weight_diff_loss {weight_diff_loss:.3f}, {type_ways[way]}_way", end="")
+                                        # combi_loss
+                                        rote_loss, mse_loss = self.combi_loss(next_base_img_embs, next_image_embs,
+                                                                                                next_unclip_embs, next_pred_unclip_embs)
+                                        weight_diff_loss = 0.5
+                                        if len(self.hist["acc"]):
+                                            weight_diff_loss = np.mean(self.hist["acc"][-min(len(self.hist["acc"]), self.window):])
+
+
+                                        way_rote_loss += weight_diff_loss * rote_loss
+                                        way_mse_loss += weight_diff_loss * mse_loss
+
+                                        # control NAN INF in loss
+                                        if torch.isnan(way_rote_loss).sum() or torch.isinf(way_rote_loss).sum():
+                                            print(f"\rMovi {id_movi} rote_loss_diff isnan or isinf, {type_ways[way]}_way")
+                                            self.logs["naninf_rote"].append(id_movi)
+                                            break
+
+                                        # control NAN INF in loss
+                                        if torch.isnan(way_mse_loss).sum() or torch.isinf(way_mse_loss).sum():
+                                            print(f"\rMovi {id_movi} mse_loss_diff isnan or isinf, {type_ways[way]}_way")
+                                            self.logs["naninf_mse"].append(id_movi)
+                                            break
+
+                                        del(take_text_embs, take_base_unclip_embs)
+                                        del(next_image_embs, next_base_img_embs, next_increments, next_text_hid_states)
+                                        del(take_text_hid_states,  next_unclip_embs)
+                                        del(pred_unclip_embs, next_pred_unclip_embs)
+                                        self.flush_memory()
+                                        print(f"\rWay_loss.backward on {id_m} step with weight_diff_loss {weight_diff_loss:.3f}, {type_ways[way]}_way", end="")
 
 
                                 # collect loss
