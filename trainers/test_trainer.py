@@ -268,13 +268,13 @@ class RoteTrainer():
                         self.maker_points.time_labels = labels
                         config_norm, config_back = self.maker_points.getpoints_rotetrain()
 
+
                         for way in range(ways):
 
                             way_loss = 0
                             way_rote_loss = 0
                             way_mse_loss = 0
                             way_loss_base = 0
-                            way_cos_acc = 0
 
                             if not way: # normal way
                                 all_points = self.maker_points.points
@@ -366,8 +366,8 @@ class RoteTrainer():
                                                              init_unclip = base_unclip_embs[bs_idx],
                                                              pred_unclip = pred_unclip_embs,
                                                              )
-                                
-                                way_cos_acc+=cos_acc
+                                                            # collect cos_acc
+                                eph_cos_acc+= cos_acc.mean().item()/len(type_ways)
 
                                 # control NAN INF in acc
                                 if torch.isnan(cos_acc).sum() or torch.isinf(cos_acc).sum():
@@ -659,10 +659,6 @@ class RoteTrainer():
 
                               self.logs["bad_movi"].append(id_movi)
                               print(f'\rMovi {id_movi} has some static frames', end="")
-
-                         # collect cos_acc
-                        if way: way_cos_acc = way_cos_acc.mean().item()/2
-                        eph_cos_acc += way_cos_acc
 
                         # clear
                         del(increments_base, diff_img_embs) 
