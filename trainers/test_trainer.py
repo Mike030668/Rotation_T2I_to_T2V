@@ -367,7 +367,7 @@ class RoteTrainer():
                                                              pred_unclip = pred_unclip_embs,
                                                              )
                                                             # collect cos_acc
-                                eph_cos_acc+= cos_acc.mean().item()/len(type_ways)
+                                eph_cos_acc+= cos_acc.mean().item()
 
                                 # control NAN INF in acc
                                 if torch.isnan(cos_acc).sum() or torch.isinf(cos_acc).sum():
@@ -673,7 +673,7 @@ class RoteTrainer():
                     del(text_hid_states, base_unclip_embs)
 
                 # collect data
-                good_steps = len(take_data)
+                good_steps = len(take_data)*len(type_ways)
                 eph_cos_acc/=good_steps
                 eph_loss/=good_steps
                 eph_loss_mse/=good_steps
