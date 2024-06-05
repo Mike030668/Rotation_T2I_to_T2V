@@ -378,7 +378,8 @@ class RoteTrainer():
 
                                 # temp show losses for batch
                                 if id_m:
-                                  print(f"\rMovi {id_movi} step {id_m} base_{type_ways[way]}_way mse {eph_loss_mse/id_m:.5f} | rote {eph_loss_rote/id_m:.5f} | lr {cur_lr:.5e}", end="")
+                                  rate = id_m*(way+1)
+                                  print(f"\rMovi {id_movi} step {id_m} base_{type_ways[way]}_way mse {eph_loss_mse/rate:.5f} | rote {eph_loss_rote/rate:.5f} | lr {cur_lr:.5e}", end="")
 
                                 #########  Rotation train steps ########################################
                                 to_rote, rote_norm, rote_back = 0, 0, 0
