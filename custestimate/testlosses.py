@@ -11,7 +11,7 @@ class TemporalConsistencyLoss(nn.Module):
     def forward(self, sequence):
         assert sequence.dim() == 3, f"Expected 3D tensor, got {sequence.dim()}D tensor instead"
         diff = sequence[1:, :, :] - sequence[:-1, :, :]
-        diff = torch.clamp(diff, min=-1e3, max=1e3)  # Adjust clamping range
+        diff = torch.clamp(diff, min=-1e6, max=1e6)
         loss = torch.mean(diff.pow(2))
         loss = torch.nan_to_num(loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         return loss
@@ -24,13 +24,12 @@ class SequenceSmoothnessLoss(nn.Module):
     def forward(self, sequence):
         assert sequence.dim() == 3, f"Expected 3D tensor, got {sequence.dim()}D tensor instead"
         diff1 = sequence[1:, :, :] - sequence[:-1, :, :]
-        diff1 = torch.clamp(diff1, min=-1e3, max=1e3)  # Adjust clamping range
+        diff1 = torch.clamp(diff1, min=-1e6, max=1e6)
         diff2 = diff1[1:, :, :] - diff1[:-1, :, :]
-        diff2 = torch.clamp(diff2, min=-1e3, max=1e3)  # Adjust clamping range
+        diff2 = torch.clamp(diff2, min=-1e6, max=1e6)
         loss = torch.mean(diff2.pow(2))
         loss = torch.nan_to_num(loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         return loss
-
 
 class CombinedLoss_base(nn.Module):
     def __init__(self, weight_rote=0.5, weight_mse=0.5, cos_way=-1, dim_norm=1, eps=1e-8):
@@ -60,10 +59,10 @@ class CombinedLoss_base(nn.Module):
 
         mse_loss = self.mse_loss(diff_img, diff_unclip)
         mse_loss = torch.mean(mse_loss, dim=0)
-        
+
         cos_loss = torch.nan_to_num(cos_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         mse_loss = torch.nan_to_num(mse_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
-        
+
         return self.weight_rote * cos_loss, self.weight_mse * mse_loss
 
 class CombinedLossBaseWithTemporal(nn.Module):
@@ -82,17 +81,18 @@ class CombinedLossBaseWithTemporal(nn.Module):
         base_cos_loss, base_mse_loss = self.base_loss_fn(init_img_vec, next_img_vec, init_unclip, pred_unclip)
 
         pred_unclip_3d = pred_unclip.unsqueeze(1) if pred_unclip.dim() == 2 else pred_unclip
-        
+
         temporal_loss = self.temporal_consistency_loss(pred_unclip_3d)
         smoothness_loss = self.sequence_smoothness_loss(pred_unclip_3d)
-        
+
         combined_loss_cos = base_cos_loss + self.weight_temporal * temporal_loss + self.weight_smoothness * smoothness_loss
         combined_loss_mse = base_mse_loss + self.weight_temporal * temporal_loss + self.weight_smoothness * smoothness_loss
-        
+
         combined_loss_cos = torch.nan_to_num(combined_loss_cos, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         combined_loss_mse = torch.nan_to_num(combined_loss_mse, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
-        
+
         return combined_loss_cos, combined_loss_mse
+
     
 
 ##############################################################################################################
