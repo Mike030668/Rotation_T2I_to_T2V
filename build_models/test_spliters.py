@@ -1176,7 +1176,7 @@ class Spliter_next_CSA(nn.Module):
         self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
         self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
         self.consistent_self_attn = ConsistentSelfAttention(emb_dim).to(device)
-        
+        self.emb_dim = emb_dim
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
         self.down_block = nn.Sequential(
