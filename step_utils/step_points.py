@@ -73,6 +73,8 @@ class ComputeDiffPoints():
                 config[f'delta'].append(delta)
                 #config[f'norm_delta'].append(delta/(end - points_2[id_2]))
                 config[f'norm_delta'].append(delta/end)
+        if len(config[f'id_img_emb_s']):
+           config[f'id_img_emb_s'], config[f'id_uclip_emb'], config[f'id_img_delta'], config[f'delta'], config[f'norm_delta']= zip(*sorted(zip(config[f'id_img_emb_s'], config[f'id_uclip_emb'], config[f'id_img_delta'], config[f'delta'], config[f'norm_delta'])))    
         return config
 
 

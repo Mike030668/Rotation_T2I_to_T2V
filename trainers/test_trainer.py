@@ -8,6 +8,7 @@ from tqdm.notebook import tqdm
 from step_utils.step_points import Shuff_Reshuff
 
 
+
 class RoteTrainer():
         def __init__(self,
                       model,
@@ -378,7 +379,6 @@ class RoteTrainer():
 
                                 # temp show losses for batch
                                 if id_m:
-                                  #rate = id_m*(way+1)
                                   rate = id_m*ways
                                   print(f"\rMovi {id_movi} step {id_m} base_{type_ways[way]}_way mse {eph_loss_mse/rate:.5f} | rote {eph_loss_rote/rate:.5f} | lr {cur_lr:.5e}", end="")
 
@@ -393,130 +393,104 @@ class RoteTrainer():
                                         rote_back = len(config_back['id_uclip_emb'])
 
                                     # control size batch
-                                    if not way and rote_norm > self.max_batch -1:
-                                      config_norm['id_uclip_emb'] = config_norm['id_uclip_emb'][:d_batch]
-                                      config_norm['id_img_emb_s'] = config_norm['id_img_emb_s'][:d_batch]
-                                      config_norm['id_img_delta'] = config_norm['id_img_delta'][:d_batch]
-                                      config_norm['norm_delta'] = config_norm['norm_delta'][:d_batch]
-                                      rote_norm = len(config_norm['id_uclip_emb'])
+                                    if not way:
+                                      id_img_emb_s = np.array(config_norm['id_img_emb_s'])
+                                      id_uclip_emb = np.array(config_norm['id_uclip_emb'])
+                                      id_img_delta = np.array(config_norm['id_img_delta'])
+                                      norm_delta = np.array(config_norm['norm_delta'])
 
-                                    if way and rote_back > self.max_batch -1:
-                                      config_back['id_uclip_emb'] = config_back['id_uclip_emb'][:d_batch]
-                                      config_back['id_img_emb_s'] = config_back['id_img_emb_s'][:d_batch]
-                                      config_back['id_img_delta'] = config_back['id_img_delta'][:d_batch]
-                                      config_back['norm_delta'] = config_back['norm_delta'][:d_batch]
-                                      rote_back = len(config_back['id_uclip_emb'])
+
+                                    if way and rote_back:
+                                      id_img_emb_s = np.array(config_back['id_img_emb_s'])
+                                      id_uclip_emb = np.array(config_back['id_uclip_emb'])
+                                      id_img_delta = np.array(config_back['id_img_delta'])
+                                      norm_delta = (-1)*np.array(config_back['norm_delta'])
 
                                     to_rote =  rote_norm + rote_back
 
                                 if self.add_rote_train and to_rote: #
-                                    take_text_hid_states = []
-                                    take_base_unclip_embs = []
-                                    take_base_img_embs = []
-                                    take_text_embs = []
+                                    unique_id_img_emb = np.unique(id_img_emb_s)
+                                    rote_steps = len(unique_id_img_emb)
 
-                                    base_img_embs_2rt = []
-                                    image_embs_2rt = []
-                                    increments_2rt = []
+                                    for unique_id in unique_id_img_emb:
 
+                                        # take indes for eacc rote step
+                                        set_dxs = np.where(id_img_emb_s == unique_id)[0]
 
-                                    if not way and rote_norm:
                                         # intit class for shufflee again
-                                        srs = Shuff_Reshuff(rote_norm)
+                                        srs = Shuff_Reshuff(len(set_dxs))#[rote_norm, rote_back][way])
                                         if self.suff_direct:
                                             s_idx = srs.shuffle() # shuffleed indexees
                                         else:
                                             s_idx = srs.idx_base  # shuffleed indexees
 
                                         # collect norm steps
-                                        take_text_hid_states.append(torch.clone(text_hid_states[:d_batch])[config_norm['id_uclip_emb']])
-                                        take_base_unclip_embs.append(torch.clone(base_unclip_embs[:d_batch])[config_norm['id_uclip_emb']])
-                                        take_base_img_embs.append(torch.clone(base_img_embs[:d_batch])[config_norm['id_uclip_emb']])
-                                        take_text_embs.append(torch.clone(text_embs[:d_batch])[config_norm['id_uclip_emb']])
+                                        take_text_hid_states = torch.clone(text_hid_states)[id_uclip_emb[set_dxs],:,:]
+                                        take_base_unclip_embs = torch.clone(base_unclip_embs)[id_uclip_emb[set_dxs],:,:]
+                                        take_base_img_embs = torch.clone(base_img_embs)[id_uclip_emb[set_dxs],:,:]
+                                        take_text_embs = torch.clone(text_embs)[id_uclip_emb[set_dxs],:,:]
+                                        base_img_embs_2rt = torch.clone(img_embs)[id_img_emb_s[set_dxs],:,:]
+                                        image_embs_2rt = torch.clone(img_embs)[id_img_delta[set_dxs],:,:]
+                                        increments_2rt = torch.tensor(norm_delta[set_dxs]).unsqueeze(1)
 
-                                        base_img_embs_2rt.append(torch.clone(img_embs[:d_batch])[config_norm['id_img_emb_s']])
-                                        image_embs_2rt.append(torch.clone(img_embs[:d_batch])[config_norm['id_img_delta']])
-                                        increments_2rt.append(torch.tensor(config_norm['norm_delta']).unsqueeze(1))
-
-
-                                    if way and rote_back and self.add_back_train:
-                                        # intit class for shufflee again
-                                        srs = Shuff_Reshuff(rote_back)
-                                        if self.suff_direct:
-                                            s_idx = srs.shuffle()   # shuffleed indexees
-                                        else:
-                                            s_idx = srs.idx_base # shuffleed indexees
-                                        # collect back steps
-                                        take_text_hid_states.append(torch.clone(text_hid_states[:d_batch])[config_back['id_uclip_emb']])
-                                        take_base_unclip_embs.append(torch.clone(base_unclip_embs[:d_batch])[config_back['id_uclip_emb']])
-                                        take_base_img_embs.append(torch.clone(base_img_embs[:d_batch])[config_back['id_uclip_emb']])
-                                        take_text_embs.append(torch.clone(text_embs[:d_batch])[config_back['id_uclip_emb']])
-
-                                        base_img_embs_2rt.append(torch.clone(img_embs[:d_batch])[config_back['id_img_emb_s']])
-                                        image_embs_2rt.append(torch.clone(img_embs[:d_batch])[config_back['id_img_delta']])
-                                        increments_2rt.append((-1)*torch.tensor(config_back['norm_delta']).unsqueeze(1))
+                                        # shufle
+                                        take_text_hid_states = take_text_hid_states[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_base_unclip_embs = take_base_unclip_embs[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_base_img_embs = take_base_img_embs[s_idx].to(self.DEVICE)
+                                        take_text_embs = take_text_embs[s_idx].to(self.DEVICE)
+                                        base_img_embs_2rt = base_img_embs_2rt[s_idx].to(self.DEVICE).to(torch.float32)
+                                        image_embs_2rt = image_embs_2rt[s_idx].to(self.DEVICE).to(torch.float32)
+                                        increments_2rt = increments_2rt[s_idx].to(self.DEVICE)
 
 
-                                    # shufle
-                                    take_text_hid_states = torch.concat(take_text_hid_states)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    take_base_unclip_embs = torch.concat(take_base_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    take_base_img_embs = torch.concat(take_base_img_embs)[s_idx].to(self.DEVICE)
-                                    take_text_embs = torch.concat(take_text_embs)[s_idx].to(self.DEVICE)
+                                        # get rotation marixes_i2i
+                                        R_marixes_i2i = self.RV.get_rotation_matrix(take_base_img_embs.squeeze(1).to(torch.float32).to(self.DEVICE),
+                                                                                    base_img_embs_2rt.squeeze(1).to(torch.float32)).to(self.DEVICE)
 
+                                        # get cos_sim  base_img_embs vectors and base_unclip_embs vectors
+                                        cos_sim_1 = torch.cosine_similarity(take_base_img_embs.to(self.DEVICE), take_base_unclip_embs, dim = -1)
 
-                                    base_img_embs_2rt = torch.concat(base_img_embs_2rt)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    image_embs_2rt = torch.concat(image_embs_2rt)[s_idx].to(self.DEVICE).to(torch.float32)
-                                    increments_2rt = torch.concat(increments_2rt)[s_idx].to(self.DEVICE)
+                                        # compute roted unclip_embs with R_marixes_i2i and cos_sim base_img_embs and base_unclip_embs
+                                        unclip_embs_2rt = self.RV.cosin_rotate(take_base_unclip_embs, cos_sim_1.to(self.DEVICE), R_marixes_i2i,  power = self.pow_rote)
 
+                                        # get rotation marixes_u2u
+                                        R_marixes_u2u = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1).to(torch.float32).to(self.DEVICE),
+                                                                                    unclip_embs_2rt.squeeze(1).to(torch.float32))
 
-                                    # get rotation marixes_i2i
-                                    R_marixes_i2i = self.RV.get_rotation_matrix(take_base_img_embs.squeeze(1).to(torch.float32).to(self.DEVICE),
-                                                                                base_img_embs_2rt.squeeze(1).to(torch.float32)).to(self.DEVICE)
+                                        cos_sim_2 = torch.cosine_similarity(take_base_unclip_embs.to(self.DEVICE), take_text_embs, dim = -1)
+                                        text_hid_states_2rt = self.RV.cosin_rotate(take_text_hid_states, cos_sim_2.to(self.DEVICE), R_marixes_u2u, power = self.pow_rote)
+                                        
 
-                                    # get cos_sim  base_img_embs vectors and base_unclip_embs vectors
-                                    cos_sim_1 = torch.cosine_similarity(take_base_img_embs.to(self.DEVICE), take_base_unclip_embs, dim = -1)
+                                        # rotation predict
+                                        pred_rote_embs = self.model(
+                                                      text_hidden_states = text_hid_states_2rt,
+                                                      prior_embeds = unclip_embs_2rt,
+                                                      rise = increments_2rt.to(torch.float32)
+                                                                        )
+                                        
+                                        # combi_loss
+                                        rote_loss, mse_loss = self.combi_loss(base_img_embs_2rt, image_embs_2rt,
+                                                                              unclip_embs_2rt, pred_rote_embs)
 
-                                    # compute roted unclip_embs with R_marixes_i2i and cos_sim base_img_embs and base_unclip_embs
-                                    unclip_embs_2rt = self.RV.cosin_rotate(take_base_unclip_embs, cos_sim_1.to(self.DEVICE), R_marixes_i2i,  power = self.pow_rote)
+                                        way_rote_loss += rote_loss/rote_steps
+                                        way_mse_loss += mse_loss/rote_steps
 
-                                    # get rotation marixes_u2u
-                                    R_marixes_u2u = self.RV.get_rotation_matrix(take_base_unclip_embs.squeeze(1).to(torch.float32).to(self.DEVICE),
-                                                                                unclip_embs_2rt.squeeze(1).to(torch.float32))
+                                        # control NAN INF in loss
+                                        if torch.isnan(way_rote_loss).sum() or torch.isinf(way_rote_loss).sum():
+                                          print(f"\rMovi {id_movi} rote_loss_rote isnan or isinf, {type_ways[way]}_way")
+                                          self.logs["naninf_rote"].append(id_movi)
+                                          break
 
-                                    cos_sim_2 = torch.cosine_similarity(take_base_unclip_embs.to(self.DEVICE), take_text_embs, dim = -1)
-                                    text_hid_states_2rt = self.RV.cosin_rotate(take_text_hid_states, cos_sim_2.to(self.DEVICE), R_marixes_u2u, power = self.pow_rote)
+                                        # control NAN INF in loss
+                                        if torch.isnan(way_mse_loss).sum() or torch.isinf(way_mse_loss).sum():
+                                          print(f"\rMovi {id_movi} mse_loss_rote isnan or isinf, {type_ways[way]}_way")
+                                          self.logs["naninf_mse"].append(id_movi)
+                                          break
 
-
-                                    # rotation predict
-                                    pred_rote_embs = self.model(
-                                                  text_hidden_states = text_hid_states_2rt,
-                                                  prior_embeds = unclip_embs_2rt,
-                                                  rise = increments_2rt.to(torch.float32)
-                                                                    )
-
-                                    # combi_loss
-                                    rote_loss, mse_loss = self.combi_loss(base_img_embs_2rt, image_embs_2rt,
-                                                                          unclip_embs_2rt, pred_rote_embs)
-
-                                    way_rote_loss += rote_loss
-                                    way_mse_loss += mse_loss
-
-                                    # control NAN INF in loss
-                                    if torch.isnan(way_rote_loss).sum() or torch.isinf(way_rote_loss).sum():
-                                      print(f"\rMovi {id_movi} rote_loss_rote isnan or isinf, {type_ways[way]}_way")
-                                      self.logs["naninf_rote"].append(id_movi)
-                                      break
-
-                                    # control NAN INF in loss
-                                    if torch.isnan(way_mse_loss).sum() or torch.isinf(way_mse_loss).sum():
-                                      print(f"\rMovi {id_movi} mse_loss_rote isnan or isinf, {type_ways[way]}_way")
-                                      self.logs["naninf_mse"].append(id_movi)
-                                      break
-
-                                    del(increments_2rt, take_text_embs, take_base_unclip_embs, take_base_img_embs, take_text_hid_states)
-                                    del(pred_rote_embs, text_hid_states_2rt, R_marixes_i2i, R_marixes_u2u)
-                                    del(unclip_embs_2rt, image_embs_2rt)
-                                    self.flush_memory()
+                                        del(increments_2rt, take_text_embs, take_base_unclip_embs, take_base_img_embs, take_text_hid_states)
+                                        del(pred_rote_embs, text_hid_states_2rt, R_marixes_i2i, R_marixes_u2u)
+                                        del(unclip_embs_2rt, image_embs_2rt)
+                                        self.flush_memory()
 
                                 #########  Diff train steps ########################################
                                 to_diff, diff_norm, diff_back = 0, 0, 0
@@ -532,66 +506,49 @@ class RoteTrainer():
                                     to_diff = diff_norm + diff_back
 
                                 if self.add_diff_train and to_diff:
-                                    take_text_hid_states = []
-                                    take_base_unclip_embs = []
-                                    take_text_embs  = []
-
-                                    next_unclip_embs = []
-                                    next_base_img_embs = []
-                                    next_image_embs = []
-                                    next_increments = []
-
 
                                     # un_shuffleed
                                     pred_unclip_embs = torch.clone(pred_unclip_embs.detach().cpu())[bu_idx]
 
-
                                     if not way and diff_norm:
-                                        # intit class for shufflee again
-                                        srs = Shuff_Reshuff(diff_norm)
-                                        if self.suff_direct:
-                                            s_idx = srs.shuffle() # shuffleed indexees
-                                        else:
-                                            s_idx = srs.idx_base # shuffleed indexees
                                         # collect diff norm steps
-                                        take_base_unclip_embs.append(torch.clone(base_unclip_embs[:d_batch])[config_diff_norm['id_uclip_emb']])
-                                        take_text_hid_states.append(torch.clone(text_hid_states[:d_batch])[config_diff_norm['id_uclip_emb']])
-                                        take_text_embs.append(torch.clone(text_embs[:d_batch])[config_diff_norm['id_uclip_emb']])
-
-                                        next_unclip_embs.append(torch.clone(pred_unclip_embs[:d_batch])[config_diff_norm['id_uclip_emb']])
-                                        next_base_img_embs.append(torch.clone(img_embs[:d_batch])[config_diff_norm['id_img_emb_s']])
-                                        next_image_embs.append(torch.clone(img_embs[:d_batch])[config_diff_norm['id_img_delta']])
-                                        next_increments.append(torch.tensor(config_diff_norm['norm_delta']).unsqueeze(1))
+                                        take_base_unclip_embs =torch.clone(base_unclip_embs)[config_diff_norm['id_uclip_emb'],:,:]
+                                        take_text_hid_states = torch.clone(text_hid_states)[config_diff_norm['id_uclip_emb'],:,:]
+                                        take_text_embs = torch.clone(text_embs)[config_diff_norm['id_uclip_emb'],:,:]
+                                        next_unclip_embs = torch.clone(pred_unclip_embs)[config_diff_norm['id_uclip_emb'],:,:]
+                                        next_base_img_embs = torch.clone(img_embs)[config_diff_norm['id_img_emb_s'],:,:]
+                                        next_image_embs = torch.clone(img_embs)[config_diff_norm['id_img_delta'],:,:]
+                                        next_increments = torch.tensor(config_diff_norm['norm_delta']).unsqueeze(1)
 
 
                                     if way and diff_back:
+                                        # collect diff back steps
+                                        take_base_unclip_embs = torch.clone(base_unclip_embs)[config_diff_back['id_uclip_emb'],:,:]
+                                        take_text_hid_states = torch.clone(text_hid_states)[config_diff_back['id_uclip_emb'],:,:]
+                                        take_text_embs = torch.clone(text_embs)[config_diff_back['id_uclip_emb'],:,:]
+                                        next_unclip_embs = torch.clone(pred_unclip_embs)[config_diff_back['id_uclip_emb'],:,:]
+                                        next_base_img_embs = torch.clone(img_embs)[config_diff_back['id_img_emb_s'],:,:]
+                                        next_image_embs = torch.clone(img_embs)[config_diff_back['id_img_delta'],:,:]
+                                        next_increments = (-1)*torch.tensor(config_diff_back['norm_delta']).unsqueeze(1)
+
+
+                                    if (not way and diff_norm) or (way and diff_back):
+
                                         # intit class for shufflee again
-                                        srs = Shuff_Reshuff(diff_back)
+                                        srs = Shuff_Reshuff([diff_norm, diff_back][way])
                                         if self.suff_direct:
                                             s_idx = srs.shuffle() # shuffleed indexees
                                         else:
                                             s_idx = srs.idx_base # shuffleed indexees
-                                        # collect diff back steps
-                                        take_base_unclip_embs.append(torch.clone(base_unclip_embs[:d_batch])[config_diff_back['id_uclip_emb']])
-                                        take_text_hid_states.append(torch.clone(text_hid_states[:d_batch])[config_diff_back['id_uclip_emb']])
-                                        take_text_embs.append(torch.clone(text_embs[:d_batch])[config_diff_back['id_uclip_emb']])
 
-                                        next_unclip_embs.append(torch.clone(pred_unclip_embs[:d_batch])[config_diff_back['id_uclip_emb']])
-                                        next_base_img_embs.append(torch.clone(img_embs[:d_batch])[config_diff_back['id_img_emb_s']])
-                                        next_image_embs.append(torch.clone(img_embs[:d_batch])[config_diff_back['id_img_delta']])
-                                        next_increments.append((-1)*torch.tensor(config_diff_back['norm_delta']).unsqueeze(1))
-
-
-                                    if (not way and diff_norm) or (way and diff_back):
                                         # collect torch.concat
-                                        take_base_unclip_embs = torch.concat(take_base_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                        take_text_hid_states = torch.concat(take_text_hid_states)[s_idx].to(self.DEVICE).to(torch.float32)
-                                        take_text_embs = torch.concat(take_text_embs)[s_idx].to(self.DEVICE)
-
-                                        next_unclip_embs = torch.concat(next_unclip_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                        next_base_img_embs = torch.concat(next_base_img_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                        next_image_embs = torch.concat(next_image_embs)[s_idx].to(self.DEVICE).to(torch.float32)
-                                        next_increments = torch.concat(next_increments)[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_base_unclip_embs = take_base_unclip_embs[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_text_hid_states = take_text_hid_states[s_idx].to(self.DEVICE).to(torch.float32)
+                                        take_text_embs = take_text_embs[s_idx].to(self.DEVICE)
+                                        next_unclip_embs = next_unclip_embs[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_base_img_embs = next_base_img_embs[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_image_embs = next_image_embs[s_idx].to(self.DEVICE).to(torch.float32)
+                                        next_increments = next_increments[s_idx].to(self.DEVICE).to(torch.float32)
 
 
                                         # get rotation vectors
