@@ -143,7 +143,9 @@ class CombinedLossBaseMEG(nn.Module):
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
         device = pred_unclip.device
         diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_img.requires_grad_()
         diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
+        diff_unclip.requires_grad_()
         target = torch.ones(diff_img.shape[0]).to(device)
         diff_img_norm = F.normalize(diff_img, dim=self.dim_norm)
         diff_unclip_norm = F.normalize(diff_unclip, dim=self.dim_norm)
