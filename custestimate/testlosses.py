@@ -99,19 +99,6 @@ class CombinedLossBaseWithTemporal(nn.Module):
 
 ############### Neuman_losses ##############################   
 
-class MEGUpdate(nn.Module):
-    def __init__(self, eta=0.1):
-        super(MEGUpdate, self).__init__()
-        self.eta = eta
-
-    def forward(self, R, grad):
-        skew_grad = grad - grad.transpose(-1, -2)
-        log_R = torch.log(R)
-        update = log_R - self.eta * skew_grad
-        new_R = torch.matrix_exp(update)
-        return new_R
-
-
 class CombinedLossBaseMEG(nn.Module):
     def __init__(self, weight_rote=0.5, weight_mse=0.5, eta=0.01, cos_way=-1, dim_norm=1, eps=1e-8):
         super(CombinedLossBaseMEG, self).__init__()
@@ -137,22 +124,26 @@ class CombinedLossBaseMEG(nn.Module):
         skew_grad = (skew_grad - skew_grad.transpose(-1, -2)) / 2.0  # Ensure it is skew-symmetric
         log_R = torch.log(R)
         update = log_R - self.eta * skew_grad.mean(dim=0)
-        new_R = torch.matrix_exp(update)  # Use matrix exponential for SO(n) update
+
+        # Use an approximation for the matrix exponential for debugging
+        new_R = torch.eye(feature_dim, device=grad.device) + update + 0.5 * update @ update
         return new_R
 
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
         device = pred_unclip.device
-        diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_img = (init_img_vec - next_img_vec).squeeze(dim=0).to(device).to(torch.float32)
         diff_img.requires_grad = True
+        
         diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
-        target = torch.ones(diff_img.shape[0]).to(device)
-        diff_img_norm = F.normalize(diff_img, dim=self.dim_norm)
+        diff_img_norm = F.normalize(diff_img, dim=self.dim_norm).squeeze(dim=1)
         diff_unclip_norm = F.normalize(diff_unclip, dim=self.dim_norm)
+        # Adjusted to match feature dimension
+        target = torch.ones(diff_img_norm.shape[-1], device=device)
 
         if self.cos_way == 1:
-            cos_loss = 1 - self.cos_loss(diff_img_norm, diff_unclip_norm, target.to(device))
+            cos_loss = 1 - self.cos_loss(diff_img_norm.T, diff_unclip_norm.T, target)
         elif self.cos_way == -1:
-            cos_loss = self.cos_loss(diff_img_norm, diff_unclip_norm, (-1) * target.to(device))
+            cos_loss = self.cos_loss(diff_img_norm.T, diff_unclip_norm.T, (-1) * target)
         else:
             raise ValueError("cos_way must be 1 or -1")
 
@@ -161,29 +152,37 @@ class CombinedLossBaseMEG(nn.Module):
 
         cos_loss = torch.nan_to_num(cos_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         mse_loss = torch.nan_to_num(mse_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+        mse_loss = torch.mean(mse_loss, dim=0)
 
-        # Convert losses to scalar before computing gradients
-        cos_loss_scalar = torch.mean(cos_loss)
-        
         # Update rotation matrices with MEG
         R = torch.eye(diff_img.shape[-1], device=device)  # Initial rotation matrix
-        grad = torch.autograd.grad(cos_loss_scalar, diff_img, retain_graph=True)[0]
+        grad = torch.autograd.grad(cos_loss.sum(), diff_img, retain_graph=True, create_graph=True)[0].squeeze(dim=1)
         R = self.meg_update(R, grad)
 
         # Apply the rotation matrix to diff_img
         rotated_diff_img = torch.matmul(diff_img, R)
 
         # Recalculate the losses with rotated diff_img
-        rotated_diff_img_norm = F.normalize(rotated_diff_img, dim=self.dim_norm)
-        rotated_cos_loss = self.cos_loss(rotated_diff_img_norm, diff_unclip_norm, target.to(device))
+        rotated_diff_img_norm = F.normalize(rotated_diff_img, dim=self.dim_norm).squeeze(dim=1)
+
+        if self.cos_way == 1:
+              rotated_cos_loss = 1 - self.cos_loss(rotated_diff_img_norm.T, diff_unclip_norm.T, target)
+        elif self.cos_way == -1:
+              rotated_cos_loss = self.cos_loss(rotated_diff_img_norm.T, diff_unclip_norm.T, (-1) * target)
+        else:
+              raise ValueError("cos_way must be 1 or -1")
 
         rotated_mse_loss = self.mse_loss(rotated_diff_img, diff_unclip)
         rotated_mse_loss = torch.mean(rotated_mse_loss, dim=0)
 
         rotated_cos_loss = torch.nan_to_num(rotated_cos_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         rotated_mse_loss = torch.nan_to_num(rotated_mse_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+        rotated_mse_loss = torch.mean(rotated_mse_loss, dim=0)
 
-        return self.weight_rote * torch.mean(rotated_cos_loss), self.weight_mse * torch.mean(rotated_mse_loss)
+        mse_loss += rotated_mse_loss
+        cos_loss += rotated_cos_loss
+
+        return self.weight_rote * cos_loss, self.weight_mse * mse_loss
 
 
 class TemporalConsistencyLoss(nn.Module):
@@ -236,12 +235,7 @@ class CombinedLossBaseWithTemporalMEG(nn.Module):
         combined_loss_cos = torch.nan_to_num(combined_loss_cos, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         combined_loss_mse = torch.nan_to_num(combined_loss_mse, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
 
-        # Convert combined losses to scalar before returning
-        combined_loss_cos_scalar = torch.mean(combined_loss_cos)
-        combined_loss_mse_scalar = torch.mean(combined_loss_mse)
-
-        return combined_loss_cos_scalar, combined_loss_mse_scalar
-
+        return combined_loss_cos, combined_loss_mse
 
 
 
