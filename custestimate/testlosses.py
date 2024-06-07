@@ -143,6 +143,7 @@ class CombinedLossBaseMEG(nn.Module):
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
         device = pred_unclip.device
         diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_img.requires_grad = True
         diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
         target = torch.ones(diff_img.shape[0]).to(device)
         diff_img_norm = F.normalize(diff_img, dim=self.dim_norm)
@@ -163,7 +164,7 @@ class CombinedLossBaseMEG(nn.Module):
 
         # Convert losses to scalar before computing gradients
         cos_loss_scalar = torch.mean(cos_loss)
-        diff_img.requires_grad = True
+        
         # Update rotation matrices with MEG
         R = torch.eye(diff_img.shape[-1], device=device)  # Initial rotation matrix
         grad = torch.autograd.grad(cos_loss_scalar, diff_img, retain_graph=True)[0]
