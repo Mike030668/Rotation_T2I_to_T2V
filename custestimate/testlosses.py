@@ -93,11 +93,162 @@ class CombinedLossBaseWithTemporal(nn.Module):
 
         return combined_loss_cos, combined_loss_mse
 
-    
+
+
+##############################################################################################################
+
+############### Neuman_losses ##############################   
+
+class MEGUpdate(nn.Module):
+    def __init__(self, eta=0.1):
+        super(MEGUpdate, self).__init__()
+        self.eta = eta
+
+    def forward(self, R, grad):
+        skew_grad = grad - grad.transpose(-1, -2)
+        log_R = torch.log(R)
+        update = log_R - self.eta * skew_grad
+        new_R = torch.matrix_exp(update)
+        return new_R
+
+
+class CombinedLossBaseMEG(nn.Module):
+    def __init__(self, weight_rote=0.5, weight_mse=0.5, eta=0.01, cos_way=-1, dim_norm=1, eps=1e-8):
+        super(CombinedLossBaseMEG, self).__init__()
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
+        self.weight_mse = weight_mse
+        self.weight_rote = weight_rote
+        self.eta = eta
+        self.cos_way = cos_way
+        self.dim_norm = dim_norm
+        self.eps = eps
+
+    def meg_update(self, R, grad):
+        # Assuming grad is of shape (batch_size, feature_dim)
+        batch_size, feature_dim = grad.shape
+
+        # Ensure R is of correct shape (feature_dim, feature_dim)
+        if R.shape[0] != feature_dim or R.shape[1] != feature_dim:
+            R = torch.eye(feature_dim, device=grad.device)
+
+        # MEG update
+        skew_grad = grad.unsqueeze(2) - grad.unsqueeze(1)  # Create a skew-symmetric matrix from the grad
+        skew_grad = (skew_grad - skew_grad.transpose(-1, -2)) / 2.0  # Ensure it is skew-symmetric
+        log_R = torch.log(R)
+        update = log_R - self.eta * skew_grad.mean(dim=0)
+        new_R = torch.matrix_exp(update)  # Use matrix exponential for SO(n) update
+        return new_R
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+        device = pred_unclip.device
+        diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
+        target = torch.ones(diff_img.shape[0]).to(device)
+        diff_img_norm = F.normalize(diff_img, dim=self.dim_norm)
+        diff_unclip_norm = F.normalize(diff_unclip, dim=self.dim_norm)
+
+        if self.cos_way == 1:
+            cos_loss = 1 - self.cos_loss(diff_img_norm, diff_unclip_norm, target.to(device))
+        elif self.cos_way == -1:
+            cos_loss = self.cos_loss(diff_img_norm, diff_unclip_norm, (-1) * target.to(device))
+        else:
+            raise ValueError("cos_way must be 1 or -1")
+
+        mse_loss = self.mse_loss(diff_img, diff_unclip)
+        mse_loss = torch.mean(mse_loss, dim=0)
+
+        cos_loss = torch.nan_to_num(cos_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+        mse_loss = torch.nan_to_num(mse_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+
+        # Convert losses to scalar before computing gradients
+        cos_loss_scalar = torch.mean(cos_loss)
+        mse_loss_scalar = torch.mean(mse_loss)
+
+        # Update rotation matrices with MEG
+        R = torch.eye(diff_img.shape[-1], device=device)  # Initial rotation matrix
+        grad = torch.autograd.grad(cos_loss_scalar, diff_img, retain_graph=True)[0]
+        R = self.meg_update(R, grad)
+
+        # Apply the rotation matrix to diff_img
+        rotated_diff_img = torch.matmul(diff_img, R)
+
+        # Recalculate the losses with rotated diff_img
+        rotated_diff_img_norm = F.normalize(rotated_diff_img, dim=self.dim_norm)
+        rotated_cos_loss = self.cos_loss(rotated_diff_img_norm, diff_unclip_norm, target.to(device))
+
+        rotated_mse_loss = self.mse_loss(rotated_diff_img, diff_unclip)
+        rotated_mse_loss = torch.mean(rotated_mse_loss, dim=0)
+
+        rotated_cos_loss = torch.nan_to_num(rotated_cos_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+        rotated_mse_loss = torch.nan_to_num(rotated_mse_loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+
+        return self.weight_rote * torch.mean(rotated_cos_loss), self.weight_mse * torch.mean(rotated_mse_loss)
+
+
+class TemporalConsistencyLoss(nn.Module):
+    def __init__(self):
+        super(TemporalConsistencyLoss, self).__init__()
+
+    def forward(self, generated_sequence):
+        # Calculate the difference between consecutive frames
+        diff = generated_sequence[1:, :, :] - generated_sequence[:-1, :, :]
+        # Compute the L2 norm of the differences
+        loss = torch.mean(diff.pow(2))
+        return loss
+
+class SequenceSmoothnessLoss(nn.Module):
+    def __init__(self):
+        super(SequenceSmoothnessLoss, self).__init__()
+
+    def forward(self, generated_sequence):
+        # Calculate second-order differences (acceleration)
+        diff1 = generated_sequence[1:, :, :] - generated_sequence[:-1, :, :]
+        diff2 = diff1[1:, :, :] - diff1[:-1, :, :]
+        # Compute the L2 norm of the second-order differences
+        loss = torch.mean(diff2.pow(2))
+        return loss
+
+
+class CombinedLossBaseWithTemporalMEG(nn.Module):
+    def __init__(self, base_loss_fn, weight_rote=0.5, weight_mse=0.5, weight_temporal=0.5, weight_smoothness=0.5, eps=1e-8):
+        super(CombinedLossBaseWithTemporalMEG, self).__init__()
+        self.base_loss_fn = base_loss_fn
+        self.temporal_consistency_loss = TemporalConsistencyLoss()
+        self.sequence_smoothness_loss = SequenceSmoothnessLoss()
+        self.weight_rote = weight_rote
+        self.weight_mse = weight_mse
+        self.weight_temporal = weight_temporal
+        self.weight_smoothness = weight_smoothness
+        self.eps = eps
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+        base_cos_loss, base_mse_loss = self.base_loss_fn(init_img_vec, next_img_vec, init_unclip, pred_unclip)
+
+        pred_unclip_3d = pred_unclip.unsqueeze(1) if pred_unclip.dim() == 2 else pred_unclip
+
+        temporal_loss = self.temporal_consistency_loss(pred_unclip_3d)
+        smoothness_loss = self.sequence_smoothness_loss(pred_unclip_3d)
+
+        combined_loss_cos = base_cos_loss + self.weight_temporal * temporal_loss + self.weight_smoothness * smoothness_loss
+        combined_loss_mse = base_mse_loss + self.weight_temporal * temporal_loss + self.weight_smoothness * smoothness_loss
+
+        combined_loss_cos = torch.nan_to_num(combined_loss_cos, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+        combined_loss_mse = torch.nan_to_num(combined_loss_mse, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
+
+        # Convert combined losses to scalar before returning
+        combined_loss_cos_scalar = torch.mean(combined_loss_cos)
+        combined_loss_mse_scalar = torch.mean(combined_loss_mse)
+
+        return combined_loss_cos_scalar, combined_loss_mse_scalar
+
+
+
 
 ##############################################################################################################
 
 ############### CombinedLoss_trans ##############################
+
 
 class TransformationBasedRotationLoss(nn.Module):
     def __init__(self, alpha = 0.7, betta = 0.3):
