@@ -1262,7 +1262,7 @@ class DualBranchSpliterCSA(nn.Module):
         concat_cross = torch.concat([cross_text_rise, cross_text_prior], axis=1)
         
         # Apply consistent self-attention
-        concat_cross = self.consistent_self_attn(concat_cross.permute(1, 0, 2)).permute(1, 0, 2)
+        #concat_cross = self.consistent_self_attn(concat_cross.permute(1, 0, 2)).permute(1, 0, 2)
 
         base_output = self.down_block_1(concat_base.permute(0, 2, 1))
         cross_output = self.down_block_2(concat_cross.permute(0, 2, 1))
