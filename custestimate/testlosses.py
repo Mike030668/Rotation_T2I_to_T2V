@@ -69,8 +69,8 @@ class CombinedLossBaseWithTemporal(nn.Module):
     def __init__(self, base_loss_fn, weight_rote=0.5, weight_mse=0.5, weight_temporal=0.5, weight_smoothness=0.5, eps=1e-8):
         super(CombinedLossBaseWithTemporal, self).__init__()
         self.base_loss_fn = base_loss_fn
-        self.temporal_consistency_loss = TemporalConsistencyLoss(eps=eps)
-        self.sequence_smoothness_loss = SequenceSmoothnessLoss(eps=eps)
+        self.temporal_consistency_loss = TemporalConsistencyLoss()
+        self.sequence_smoothness_loss = SequenceSmoothnessLoss()
         self.weight_rote = weight_rote
         self.weight_mse = weight_mse
         self.weight_temporal = weight_temporal
