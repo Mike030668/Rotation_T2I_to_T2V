@@ -93,8 +93,78 @@ class CombinedLossBaseWithTemporal(nn.Module):
 
         return combined_loss_cos, combined_loss_mse
 
+##############################################################################################################
+
+############### Add_losses ##############################   
+
+class RoteLoss(nn.Module):
+    def __init__(self, weight_rote=0.5, weight_mse =0.5, cos_way = -1, dim_norm = 1):
+        super(RoteLoss, self).__init__()
+
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
+        self.weight_mse = weight_mse
+        self.weight_rote = weight_rote
+        self.cos_way = cos_way
+        self.dim_norm = dim_norm
+        # inite rotation class
+        self.RV = RotationVectors()
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+
+        device = pred_unclip.device
+        one_target = torch.ones(init_img_vec.shape).to(device)
+
+        # get rotation R_img
+        R_img = self.RV.get_rotation_matrix(init_img_vec.squeeze(1).to(torch.float32).to(device),
+                                            next_img_vec.squeeze(1).to(torch.float32).to(device))
+        
+        rote_img_target = torch.bmm(R_img, one_target.permute(0,2,1)).squeeze(-1)
 
 
+        # get rotation R_img
+        R_unclip = self.RV.get_rotation_matrix(init_unclip.squeeze(1).to(torch.float32).to(device),
+                                               pred_unclip.squeeze(1))                               
+
+
+        rote_unclip_target = torch.bmm(R_unclip, one_target.permute(0,2,1)).squeeze(-1)
+
+
+        target = torch.ones(rote_img_target.shape[-1])
+
+        if self.cos_way == 1:
+            cos_loss = 1 - self.cos_loss(rote_img_target.T, rote_unclip_target.T, target.to(device))  # Shape (None, 1, 1280)
+        elif self.cos_way == -1:
+            cos_loss = self.cos_loss(rote_img_target.T, rote_unclip_target.T, (-1)*target.to(device))  # Shape (None, 1, 1280)
+        else:
+            raise ValueError("cos_way must be 1 or -1")
+
+        # Calculate MSE for each element and then average across dimension 1 to match MSE shape
+        mse_loss = self.mse_loss(rote_img_target, rote_unclip_target)  # Shape (None, 1, 1280)
+        mse_loss = torch.mean(mse_loss, dim=0)#  # Reduce to Shape (None, 1)
+
+        return self.weight_rote * cos_loss, self.weight_mse * mse_loss
+    
+
+class SumLosses(nn.Module):
+    def __init__(self, set_losses, set_weights = None):
+        super(SumLosses, self).__init__()
+
+        self.set_losses = set_losses   
+        self.set_weights = [1. for _ in range(len(set_losses))] if not set_weights else set_weights
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+        
+        mse_loss = 0
+        rote_loss = 0
+        for i, loss in enumerate(self.set_losses):
+
+           rote, mse = loss(init_img_vec, next_img_vec, init_unclip, pred_unclip)
+           rote_loss +=self.set_weights[i]*rote
+           mse_loss +=self.set_weights[i]*mse
+
+        return rote_loss, mse_loss
+    
 ##############################################################################################################
 
 ############### Neuman_losses ##############################   
