@@ -8,7 +8,7 @@ class K22_T2V:
         super(K22_T2V, self).__init__()
         self.model = model
         self.decoder = decoder
-        self.device = decoder.device
+        self.device =  "cuda" #decoder.device
         self.model.eval()
 
 
