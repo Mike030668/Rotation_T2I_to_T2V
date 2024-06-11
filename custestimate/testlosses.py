@@ -129,10 +129,13 @@ class RoteLoss(nn.Module):
 
         target = torch.ones(rote_img_target.shape[-1])
 
+        norm_rote_img_target = F.normalize(rote_img_target, dim = self.dim_norm)
+        norm_rote_unclip_target = F.normalize(rote_unclip_target, dim = self.dim_norm)
+
         if self.cos_way == 1:
-            cos_loss = 1 - self.cos_loss(rote_img_target.T, rote_unclip_target.T, target.to(device))  # Shape (None, 1, 1280)
+            cos_loss = 1 - self.cos_loss(norm_rote_img_target.T, norm_rote_unclip_target.T, target.to(device))  # Shape (None, 1, 1280)
         elif self.cos_way == -1:
-            cos_loss = self.cos_loss(rote_img_target.T, rote_unclip_target.T, (-1)*target.to(device))  # Shape (None, 1, 1280)
+            cos_loss = self.cos_loss(norm_rote_img_target.T, norm_rote_unclip_target.T, (-1)*target.to(device))  # Shape (None, 1, 1280)
         else:
             raise ValueError("cos_way must be 1 or -1")
 
