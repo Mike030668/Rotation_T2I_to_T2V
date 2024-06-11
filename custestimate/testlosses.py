@@ -12,7 +12,7 @@ class TemporalConsistencyLoss(nn.Module):
         assert sequence.dim() == 3, f"Expected 3D tensor, got {sequence.dim()}D tensor instead"
         diff = sequence[1:, :, :] - sequence[:-1, :, :]
         diff = torch.clamp(diff, min=-1e6, max=1e6)
-        loss = torch.mean(diff.pow(2))
+        loss = torch.mean(diff.pow(2), dim=0).squeeze(0)
         loss = torch.nan_to_num(loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         return loss
 
@@ -27,7 +27,7 @@ class SequenceSmoothnessLoss(nn.Module):
         diff1 = torch.clamp(diff1, min=-1e6, max=1e6)
         diff2 = diff1[1:, :, :] - diff1[:-1, :, :]
         diff2 = torch.clamp(diff2, min=-1e6, max=1e6)
-        loss = torch.mean(diff2.pow(2))
+        loss = torch.mean(diff2.pow(2), dim=0).squeeze(0)
         loss = torch.nan_to_num(loss, nan=0.0, posinf=1e6, neginf=-1e6) + self.eps
         return loss
 
