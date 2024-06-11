@@ -97,9 +97,9 @@ class CombinedLossBaseWithTemporal(nn.Module):
 
 ############### Add_losses ##############################   
 
-class RoteLoss(nn.Module):
+class RoteLoss_(nn.Module):
     def __init__(self, weight_rote=0.5, weight_mse =0.5, cos_way = -1, dim_norm = 1):
-        super(RoteLoss, self).__init__()
+        super(RoteLoss_, self).__init__()
 
         self.mse_loss = nn.MSELoss(reduction='none')
         self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
@@ -113,22 +113,19 @@ class RoteLoss(nn.Module):
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
 
         device = pred_unclip.device
-        one_target = torch.ones(init_img_vec.shape).to(device)
 
         # get rotation R_img
         R_img = self.RV.get_rotation_matrix(init_img_vec.squeeze(1).to(torch.float32).to(device),
                                             next_img_vec.squeeze(1).to(torch.float32).to(device))
-        
-        rote_img_target = torch.bmm(R_img, one_target.permute(0,2,1)).squeeze(-1)
 
+        rote_img_target = torch.bmm(R_img, torch.ones(init_img_vec.shape).permute(0,2,1).to(device)).squeeze(-1)
 
         # get rotation R_img
         R_unclip = self.RV.get_rotation_matrix(init_unclip.squeeze(1).to(torch.float32).to(device),
-                                               pred_unclip.squeeze(1))                               
+                                               pred_unclip.squeeze(1))
 
 
-        rote_unclip_target = torch.bmm(R_unclip, one_target.permute(0,2,1)).squeeze(-1)
-
+        rote_unclip_target = torch.bmm(R_unclip, torch.ones(init_img_vec.shape).permute(0,2,1).to(device)).squeeze(-1)
 
         target = torch.ones(rote_img_target.shape[-1])
 
