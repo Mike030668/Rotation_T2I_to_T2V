@@ -118,12 +118,12 @@ class RoteLoss(nn.Module):
         # get rotation 
         R = self.RV.get_rotation_matrix(diff_img, diff_unclip)
 
-        unit =  torch.ones(init_img_vec.shape)
-        rote_unit = torch.bmm(R, unit.permute(0,2,1).to(device)).squeeze(-1)
+        unit =  torch.ones(init_img_vec.shape).to(device)
+        rote_unit = torch.bmm(R, unit.permute(0,2,1)).squeeze(-1)
 
 
         target = torch.ones(init_img_vec.shape[-1])
-        norm_rote_unit = F.normalize(rote_unit, dim = self.dim_norm)
+        norm_rote_unit = F.normalize(rote_unit, dim = self.dim_norm).to(device)
 
         if self.cos_way == 1:
             cos_loss = 1 - self.cos_loss(unit.squeeze(1).T, norm_rote_unit.T, target.to(device))  # Shape (None, 1, 1280)
