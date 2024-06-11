@@ -97,9 +97,9 @@ class CombinedLossBaseWithTemporal(nn.Module):
 
 ############### Add_losses ##############################   
 
-class RoteLoss_(nn.Module):
+class RoteLoss(nn.Module):
     def __init__(self, weight_rote=0.5, weight_mse =0.5, cos_way = -1, dim_norm = 1):
-        super(RoteLoss_, self).__init__()
+        super(RoteLoss, self).__init__()
 
         self.mse_loss = nn.MSELoss(reduction='none')
         self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
