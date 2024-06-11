@@ -113,34 +113,27 @@ class RoteLoss(nn.Module):
     def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
 
         device = pred_unclip.device
+        diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_unclip = (init_unclip.to(device).to(torch.float32) - pred_unclip).squeeze(dim=1)
+        # get rotation 
+        R = self.RV.get_rotation_matrix(diff_img, diff_unclip)
 
-        # get rotation R_img
-        R_img = self.RV.get_rotation_matrix(init_img_vec.squeeze(1).to(torch.float32).to(device),
-                                            next_img_vec.squeeze(1).to(torch.float32).to(device))
-
-        rote_img_target = torch.bmm(R_img, torch.ones(init_img_vec.shape).permute(0,2,1).to(device)).squeeze(-1)
-
-        # get rotation R_img
-        R_unclip = self.RV.get_rotation_matrix(init_unclip.squeeze(1).to(torch.float32).to(device),
-                                               pred_unclip.squeeze(1))
+        unit =  torch.ones(init_img_vec.shape)
+        rote_unit = torch.bmm(R, unit.permute(0,2,1).to(device)).squeeze(-1)
 
 
-        rote_unclip_target = torch.bmm(R_unclip, torch.ones(init_img_vec.shape).permute(0,2,1).to(device)).squeeze(-1)
-
-        target = torch.ones(rote_img_target.shape[-1])
-
-        norm_rote_img_target = F.normalize(rote_img_target, dim = self.dim_norm)
-        norm_rote_unclip_target = F.normalize(rote_unclip_target, dim = self.dim_norm)
+        target = torch.ones(init_img_vec.shape[-1])
+        norm_rote_unit = F.normalize(rote_unit, dim = self.dim_norm)
 
         if self.cos_way == 1:
-            cos_loss = 1 - self.cos_loss(norm_rote_img_target.T, norm_rote_unclip_target.T, target.to(device))  # Shape (None, 1, 1280)
+            cos_loss = 1 - self.cos_loss(unit.squeeze(1).T, norm_rote_unit.T, target.to(device))  # Shape (None, 1, 1280)
         elif self.cos_way == -1:
-            cos_loss = self.cos_loss(norm_rote_img_target.T, norm_rote_unclip_target.T, (-1)*target.to(device))  # Shape (None, 1, 1280)
+            cos_loss = self.cos_loss(unit.squeeze(1).T, norm_rote_unit.T, (-1)*target.to(device))  # Shape (None, 1, 1280)
         else:
             raise ValueError("cos_way must be 1 or -1")
 
         # Calculate MSE for each element and then average across dimension 1 to match MSE shape
-        mse_loss = self.mse_loss(rote_img_target, rote_unclip_target)  # Shape (None, 1, 1280)
+        mse_loss = self.mse_loss(unit, rote_unit)  # Shape (None, 1, 1280)
         mse_loss = torch.mean(mse_loss, dim=0)#  # Reduce to Shape (None, 1)
 
         return self.weight_rote * cos_loss, self.weight_mse * mse_loss
