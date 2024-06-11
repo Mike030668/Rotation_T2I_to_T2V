@@ -133,7 +133,7 @@ class RoteLoss(nn.Module):
             raise ValueError("cos_way must be 1 or -1")
 
         # Calculate MSE for each element and then average across dimension 1 to match MSE shape
-        mse_loss = self.mse_loss(unit, rote_unit)  # Shape (None, 1, 1280)
+        mse_loss = self.mse_loss(unit.squeeze(1), rote_unit)  # Shape (None, 1, 1280)
         mse_loss = torch.mean(mse_loss, dim=0)#  # Reduce to Shape (None, 1)
 
         return self.weight_rote * cos_loss, self.weight_mse * mse_loss
