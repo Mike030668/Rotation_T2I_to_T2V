@@ -1211,6 +1211,48 @@ class Spliter_next_CSA(nn.Module):
         out = self.lin_final(out).permute(0, 2, 1)
         return out
 
+class Spliter_CSA(nn.Module):
+    def __init__(self, emb_dim=EMB_DIM, max_seq_len=MAX_SEQ_LEN_K22, device='cpu'):
+        super(Spliter_CSA, self).__init__()
+        self.cross_attention = CrossAttentionLayer(emb_dim).to(device)
+        self.pos_encoder = RotaryPositionalEmbedding(emb_dim, max_seq_len, device).to(device)
+        self.consistent_self_attn = ConsistentSelfAttention(emb_dim).to(device)
+        self.emb_dim = emb_dim
+        self.device = device
+        self.lin_increment = nn.Linear(1, emb_dim).to(device)
+        self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
+        self.down_block = nn.Sequential(
+            ImprovedBlock(157, 256, 0.3),
+            ImprovedBlock(256, 128, 0.3),
+            ImprovedBlock(128, 64, 0.3),
+            ImprovedBlock(64, 32, 0.3),
+            ImprovedBlock(32, 16, 0.3),
+            ImprovedBlock(16, 8, 0.3),
+            ImprovedBlock(8, 4, 0.3)
+        ).to(device)
+        self.lin_final = nn.Linear(4, 1).to(device)
+
+    def forward(self, text_hidden_states, prior_embeds, rise):
+        increment = self.lin_increment(rise).unsqueeze(1)
+        increment = nn.LeakyReLU()(increment)
+
+        text_hidden_states = self.pos_encoder(text_hidden_states)
+
+        prior_embeds = torch.nn.functional.normalize(prior_embeds, p=2.0, dim=-1)
+        prior_trained = self.lin_start(prior_embeds)
+
+        concat_data = torch.concat([increment, text_hidden_states, prior_trained], axis=1)
+        # Apply consistent self-attention
+        onsistent_data = self.consistent_self_attn(concat_data.permute(1, 0, 2)).permute(1, 0, 2)
+
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
+        concat_data = torch.concat([onsistent_data, cross_text_prior, cross_text_rise], axis=1)
+
+        out = self.down_block(concat_data.permute(0, 2, 1))
+        out = self.lin_final(out).permute(0, 2, 1)
+        return out
+
 
 class DualBranchSpliterCSA(nn.Module):
     def __init__(self, emb_dim=EMB_DIM, max_seq_len=MAX_SEQ_LEN_K22, device='cpu'):
@@ -1222,7 +1264,7 @@ class DualBranchSpliterCSA(nn.Module):
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
         self.emb_dim = emb_dim
-        
+        self.device = device
         # Rise branch for handling rise-influenced data
         self.down_block_1 = nn.Sequential(
             ImprovedBlock(79, 128, 0.3),
