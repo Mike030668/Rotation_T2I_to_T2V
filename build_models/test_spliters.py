@@ -1180,7 +1180,7 @@ class Spliter_next_CSA(nn.Module):
         self.lin_increment = nn.Linear(1, emb_dim).to(device)
         self.lin_start = nn.Linear(emb_dim, emb_dim).to(device)
         self.down_block = nn.Sequential(
-            ImprovedBlock_next(156, 256, nn.GELU),
+            ImprovedBlock_next(157, 256, nn.GELU),
             ImprovedBlock_next(256, 128, nn.GELU),
             ImprovedBlock_next(128, 64, nn.GELU),
             ImprovedBlock_next(64, 32, nn.GELU),
@@ -1195,17 +1195,18 @@ class Spliter_next_CSA(nn.Module):
         increment = nn.LeakyReLU()(increment)
 
         text_hidden_states = self.pos_encoder(text_hidden_states)
-        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+
         prior_embeds = torch.nn.functional.normalize(prior_embeds, p=2.0, dim=-1)
         prior_trained = self.lin_start(prior_embeds)
-        cross_text_prior = self.cross_attention(prior_trained, increment)
 
-        concat_data = torch.concat([text_hidden_states, prior_embeds, cross_text_prior, cross_text_rise], axis=1)
-        concat_data = torch.nn.functional.normalize(concat_data, p=2.0, dim=-1)
-
+        concat_data = torch.concat([increment, text_hidden_states, prior_embeds], axis=1)
         # Apply consistent self-attention
         concat_data = self.consistent_self_attn(concat_data.permute(1, 0, 2)).permute(1, 0, 2)
-        
+
+        cross_text_rise = self.cross_attention(text_hidden_states, increment)
+        cross_text_prior = self.cross_attention(prior_trained, increment)
+        concat_data = torch.concat([concat_data, cross_text_prior, cross_text_rise], axis=1)
+
         out = self.down_block(concat_data.permute(0, 2, 1))
         out = self.lin_final(out).permute(0, 2, 1)
         return out
