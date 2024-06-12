@@ -1199,7 +1199,7 @@ class Spliter_next_CSA(nn.Module):
         prior_embeds = torch.nn.functional.normalize(prior_embeds, p=2.0, dim=-1)
         prior_trained = self.lin_start(prior_embeds)
 
-        concat_data = torch.concat([increment, text_hidden_states, prior_embeds], axis=1)
+        concat_data = torch.concat([increment, text_hidden_states, prior_trained], axis=1)
         # Apply consistent self-attention
         concat_data = self.consistent_self_attn(concat_data.permute(1, 0, 2)).permute(1, 0, 2)
 
