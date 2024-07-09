@@ -700,3 +700,41 @@ class CombinedLoss_RT(nn.Module):
             I_loss, RT_loss = self.trans_loss(diff_img, diff_unclip)  # Expected shape (None, 1280)
 
         return self.weight_rote * (cos_loss + RT_loss), self.weight_mse * (mse_loss + I_loss)
+
+
+############################ RiemannianCombinedLoss 
+
+class RiemannianCombinedLoss(nn.Module):
+    def __init__(self, weight_rote=0.5, weight_mse=0.5, cos_way=-1, dim_norm=1):
+        super(RiemannianCombinedLoss, self).__init__()
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.cos_loss = nn.CosineEmbeddingLoss(reduction='none')
+        self.weight_mse = weight_mse
+        self.weight_rote = weight_rote
+        self.cos_way = cos_way
+        self.dim_norm = dim_norm
+
+    def riemannian_metric(self, diff):
+        # Пример римановой метрики, сохраняющей размерность [batch, 1280]
+        return diff / (torch.sqrt(torch.sum(diff ** 2, dim=self.dim_norm, keepdim=True)) + 1e-6)
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+        device = pred_unclip.device
+        diff_img = (init_img_vec - next_img_vec).squeeze(dim=1).to(device).to(torch.float32)
+        diff_unclip = (init_unclip.squeeze(dim=1).to(device).to(torch.float32) - pred_unclip.squeeze(dim=1))
+
+        diff_img_norm = self.riemannian_metric(diff_img)
+        diff_unclip_norm = self.riemannian_metric(diff_unclip)
+ 
+        target = torch.ones(diff_img.shape[-1])
+        if self.cos_way == 1:
+            cos_loss = 1 - self.cos_loss(diff_img_norm.T, diff_unclip_norm.T, target.to(device))
+        elif self.cos_way == -1:
+            cos_loss = self.cos_loss(diff_img_norm.T, diff_unclip_norm.T, (-1) * target.to(device))
+        else:
+            raise ValueError("cos_way must be 1 or -1")
+
+        mse_loss = self.mse_loss(diff_img, diff_unclip)
+        mse_loss = torch.mean(mse_loss, dim=0)
+
+        return self.weight_rote * cos_loss, self.weight_mse * mse_loss
