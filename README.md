@@ -4,5 +4,5 @@
 
 ## Доклад на конференции DataStart [https://youtu.be/K_zmw-swod8](https://youtu.be/K_zmw-swod8)
 
-<img src="images/datastart.png" alt="png"  width="700"/> 
+<img src="images/datastart.png" alt="png"  width="800"/> 
 
