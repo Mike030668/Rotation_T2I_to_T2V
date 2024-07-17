@@ -6,3 +6,6 @@
 
 <img src="images/datastart.png" alt="png"  width="800"/> 
 
+### Концепция составного обучения модели Splitter для предсказанию нового состояния на примере задачи перевода Text_2_Image в Text_2_Video
+#### текущая стадия проекта основана на предыдужей работе [Rotation_train_Text2Image_2_task_Tex2Video](https://github.com/Mike030668/Rotation_train_Text2Image_2_task_Tex2Video)
+
