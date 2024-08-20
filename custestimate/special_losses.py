@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class FastDivergenceRotorLoss(nn.Module):
-    def __init__(self, weight_div=0.5, weight_rot=0.5, dim_norm=1):
+    def __init__(self, weight_div=1, weight_rot=1, dim_norm=1):
         super(FastDivergenceRotorLoss, self).__init__()
         self.weight_div = weight_div
         self.weight_rot = weight_rot
