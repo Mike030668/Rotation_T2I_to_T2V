@@ -6,6 +6,8 @@ class ComputeDiffPoints():
     Class to compute start, end and predict steps
     for base normal and base prediction
     and for different normal and base prediction from prediction
+
+    added getpoints_Ndiftrain for several autoregress steps
     """
     def __init__(self, treshold = 0):
         # all time_points - start .. between .. end
@@ -43,6 +45,32 @@ class ComputeDiffPoints():
         configs = self.__way_config(self.points, self.next_points, self.e_point)
         back_configs = self.__way_config(self.back_points, self.back_next_points, self.back_e_point)
         return configs, back_configs
+
+    def getpoints_Ndiftrain(self, dif_step:int):
+        self.__init_data()
+        dif_step-=1
+        #remove start point
+        points = self.time_labels[dif_step:]
+        #print("points ", points)
+        next_points = points + 1
+        next_points = list(filter(lambda num: num < self.e_point, next_points))
+        next_points = list(filter(lambda num: num in self.time_labels, next_points))
+        next_points.sort()
+        #print("next_points ", next_points)
+
+        #remove start point
+        back_points = self.back_points[dif_step:]
+        #print("back_points ", back_points)
+        back_next_points = back_points + 1
+        back_next_points = list(filter(lambda num: num < self.back_e_point, back_next_points))
+        back_next_points = list(filter(lambda num: num in self.back_points, back_next_points))
+        back_next_points.sort()
+        #print("back_next_points ", back_next_points)
+
+        configs = self.__way_config(points, next_points, self.e_point)
+        back_configs = self.__way_config(back_points, back_next_points, self.back_e_point)
+        return configs, back_configs
+
 
     def __way_config(self, points_1, points_2, end):
         idxs_1 = []

@@ -38,3 +38,21 @@ class CombinedLoss_base(nn.Module):
         return self.weight_rote * cos_loss, self.weight_mse * mse_loss
     
 
+class SumLosses(nn.Module):
+    def __init__(self, set_losses, set_weights = None):
+        super(SumLosses, self).__init__()
+
+        self.set_losses = set_losses   
+        self.set_weights = [1. for _ in range(len(set_losses))] if not set_weights else set_weights
+
+    def forward(self, init_img_vec, next_img_vec, init_unclip, pred_unclip):
+        
+        diff_loss = 0
+        rote_loss = 0
+        for i, loss in enumerate(self.set_losses):
+
+           rote, diff = loss(init_img_vec, next_img_vec, init_unclip, pred_unclip)
+           rote_loss +=self.set_weights[i]*rote
+           diff_loss +=self.set_weights[i]*diff
+
+        return rote_loss, diff_loss
