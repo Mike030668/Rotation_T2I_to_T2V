@@ -605,7 +605,6 @@ class ExpandTrainer():
                                             self.flush_memory()
 
                                 #########  Diff train steps ########################################
-
                                 # Diff train steps
                                 if self.add_diff_train:
 
@@ -696,8 +695,9 @@ class ExpandTrainer():
                                             if len(self.hist["acc"]):
                                                 weight_regress_loss = np.mean(self.hist["acc"][-min(len(self.hist["acc"]), self.window):])
                                                 # weight of diff_loss depend from diff_step
-                                                level = diff_step**0.5
-                                                weight_regress_loss = weight_regress_loss ** level
+                                                
+                                            level = diff_step**0.5
+                                            weight_regress_loss = weight_regress_loss ** level
 
                                             batch_size = len(s_idx)
                                             way_rote_loss += weight_regress_loss * rote_loss/batch_size
