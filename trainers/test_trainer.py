@@ -255,7 +255,7 @@ class ExpandTrainer():
                             d_batch = qty_frames - 1
 
                         # if used model with consistent_attention
-                        if self.consistent:
+                        if self.consistent or self.add_diff_train > 1:
                           s_id = np.random.randint(1, qty_frames - d_batch + 1)
                           # make set time_labels
                           rand_ids = [0] + list(np.arange(s_id, s_id + d_batch))
