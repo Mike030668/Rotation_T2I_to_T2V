@@ -45,6 +45,22 @@ class ComputeDiffPoints():
         configs = self.__way_config(self.points, self.next_points, self.e_point)
         back_configs = self.__way_config(self.back_points, self.back_next_points, self.back_e_point)
         return configs, back_configs
+    
+    def getpoints_diftrain_N(self, start_points:list, dif_step:int, way:int):
+        self.__init_data()
+        if way == 0:
+          next_points = self.time_labels[dif_step:]+1
+          end_point = self.e_point
+        elif way == 1:
+          next_points = self.back_points[dif_step:]+1
+          end_point = self.back_e_point
+
+        next_points = list(filter(lambda num: num <= end_point, next_points))
+        next_points = list(filter(lambda num: num in start_points, next_points))
+        next_points.sort()
+        configs = self.__way_config(next_points, start_points, end_point)
+
+        return configs, next_points
 
     def getpoints_Ndiftrain(self, dif_step:int):
         self.__init_data()
