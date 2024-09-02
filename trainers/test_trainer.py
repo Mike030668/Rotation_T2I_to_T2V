@@ -609,14 +609,14 @@ class ExpandTrainerUp():
                                     for diff_step in range(1, self.add_diff_train+1):
 
                                         if diff_step == 1:
-                                            if not way: start_points = cdp.points
-                                            elif way: start_points = cdp.back_points
+                                            if not way: start_points = self.maker_points.points
+                                            elif way: start_points = self.maker_points.back_points
                                             
                                         elif diff_step > 1:
                                             start_points = next_points
 
 
-                                        config_diff, next_points = cdp.getpoints_diftrain_N(start_points, dif_step = diff_step, way = way)
+                                        config_diff, next_points = self.maker_points.getpoints_diftrain_N(start_points, dif_step = diff_step, way = way)
                                         qty_diff = len(config_diff['id_uclip_emb'])
                                         id_img_emb_s = np.array(config_diff['id_img_emb_s'])
                                         id_uclip_emb = np.array(config_diff['id_uclip_emb'])
