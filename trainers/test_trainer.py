@@ -624,7 +624,6 @@ class ExpandTrainerUp():
                                         norm_delta = np.array(config_diff['norm_delta'])
 
                                         if qty_diff:
-                                           # print(f"way_{way}")
 
                                             if diff_step == 1:
                                                 # un_shuffleed
@@ -678,7 +677,6 @@ class ExpandTrainerUp():
                                                 prior_embeds = next_unclip_embs,
                                                 rise = next_increments,
                                                 )
-                                            print("\rnext_pred_unclip_embs", next_pred_unclip_embs.shape, end="")
 
                                             # combi_loss
                                             rote_loss, diff_loss = self.combi_loss(next_base_img_embs, next_image_embs,
