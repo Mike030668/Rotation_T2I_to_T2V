@@ -27,7 +27,7 @@ class Splitter_K22():
         self.model.load_state_dict(checkpoint['model_state_dict'])
 
 import os
-def compare_checkpoints(list_model_1, list_model_2):
+def compare_checkpoints(list_model_1, list_model_2, dir = "/content"):
     # https://discuss.pytorch.org/t/check-if-models-have-same-weights/4351/5
     # take weights from both checkpoints
     """
@@ -77,5 +77,5 @@ def compare_checkpoints(list_model_1, list_model_2):
         print('Models are same! :)')
 
     del(weights_1, weights_2)
-    os.remove(f"content/{file_name_1}")
-    os.remove(f"content/{file_name_2}")
+    os.remove(f"{dir}/{file_name_1}")
+    os.remove(f"{dir}/{file_name_2}")
