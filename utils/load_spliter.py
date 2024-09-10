@@ -30,6 +30,20 @@ class Splitter_K22():
 def compare_checkpoints(list_model_1, list_model_2):
     # https://discuss.pytorch.org/t/check-if-models-have-same-weights/4351/5
     # take weights from both checkpoints
+    """
+    :param list_model_1 
+    _________
+    dict_ckpts =   { "Spliter_next_base_loss_pw_0_tgif300_1":   {"loss_62": "1jkaET5U-ziAVYRZZX5B1v7tlGBwFbUgL"
+                    },
+                   "Increament_next_Mixloss_ab_1_pw_1_acc_norm_minus_1_300_500pxls_new_all_ways_loss":   {"mse_15": "1j6Kw-uT2-w1s-ZFDe18JCLww1zg1g2-W"
+                    }
+                    )
+    type_train = "Spliter_next_base_loss_pw_0_tgif300_1"
+    type_cpt = "loss_62"
+    file_id = dict_ckpts[type_train][type_cpt]
+    list_model_1 = [type_cpt, file_id]
+    ....
+    """
     name_1, id_weights_1 = list_model_1[0], list_model_1[1]
     file_name_1 = f"{name_1}.cpt"
     gdown.download('https://drive.google.com/uc?id=' + id_weights_1, file_name_1, quiet=False)
