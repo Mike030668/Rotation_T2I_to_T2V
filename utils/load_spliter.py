@@ -25,3 +25,42 @@ class Splitter_K22():
       except:
         checkpoint = torch.load(f"{dir}/{file_name}")
         self.model.load_state_dict(checkpoint['model_state_dict'])
+
+
+def compare_checkpoints(list_model_1, list_model_2):
+    # https://discuss.pytorch.org/t/check-if-models-have-same-weights/4351/5
+    # take weights from both checkpoints
+    name_1, id_weights_1 = list_model_1[0], list_model_1[1]
+    file_name_1 = f"{name_1}.cpt"
+    gdown.download('https://drive.google.com/uc?id=' + id_weights_1, file_name_1, quiet=False)
+    weights_1 = torch.load(file_name_1, weights_only=False)["model_state_dict"]
+
+
+
+    name_2, id_weights_2 = list_model_2[0], list_model_2[1]
+    file_name_2 = f"{name_2}.cpt"
+    gdown.download('https://drive.google.com/uc?id=' + id_weights_2, file_name_2, quiet=False)
+    weights_2 = torch.load(file_name_2, weights_only=False)["model_state_dict"]
+
+    models_differ = 0
+    all_diff = 0
+    print()
+    for key_item_1, key_item_2 in zip(weights_1.items(), weights_2.items()):
+        if torch.equal(key_item_1[1], key_item_2[1]):
+            pass
+        else:
+            models_differ += 1
+            if (key_item_1[0] == key_item_2[0]):
+
+                diff = (weights_1[key_item_1[0]] - weights_2[key_item_2[0]]).cpu().abs().numpy().sum()
+                print(f'Found difference {diff:.5e} at layer  {key_item_1[0]}')
+                all_diff+=diff
+            else:
+                raise Exception
+    print()            
+    print(f'All difference in moddel {all_diff:.5e}')
+    if models_differ == 0:
+        print('Models are same! :)')
+
+    del(weights_1, weights_2)
+    !rm {file_name_1} {file_name_2}
