@@ -1,13 +1,13 @@
 # Collected prepared pytorch datasets linls for loading
 
-TGIF_DATASETS = {"both_ways": { "300_pxls_1" : "1u3vEgamCwj-Au6xk6beWpkcVMT7UAWgB",  # file_name bothway_embed_data_min_300_1.pth  
-                                "300_pxls_2" : "1ExVnjIBEDH99NLZ0VAijeCNOC3LYKl33", 
-                                "500_pxls_1" : "1YHHzESWX6SfUn3In19UwySDUW1Hvv9w6",  # file_name bothway_embed_data_min_500_1.pth  
+TGIF_DATASETS = {"both_ways": { "300_pxls_1" : "10rIqWmBQsSgMuMVUV0UR6kJWTwYHoJK9",  # file_name bothway_embed_data_min_300_1.pth  
+                                "300_pxls_2" : "1GhfD9IdyaFsJtKpywNwp11iyMfQxzlbf", 
+                                "500_pxls_1" : "12cLQn68QcSb1n_cvk4AdJYBodaG41eQ",  # file_name bothway_embed_data_min_500_1.pth  
                                 "discription" : " embeddeed with Kand_22 torch dataset includ text_embedd and last hiden state"
                                
 
 }, 
-                 "both_ways_old": { "300_pxls" : "1MJ3sQ0EJyZVfXLGSxbe0WMI2Fk4ZyAvA",   # file_name bothway_embed_data_min_300_start.pth                                 
+                 "both_ways_old": { "300_pxls" : "12XJNomQYl4x7rVoqICF30aJkC6MNzv3Y",   # file_name bothway_embed_data_min_300_start.pth                                 
                                     "discription" : " embeddeed with Kand_22 torch dataset included only last hiden state"
                                
 
@@ -16,7 +16,7 @@ TGIF_DATASETS = {"both_ways": { "300_pxls_1" : "1u3vEgamCwj-Au6xk6beWpkcVMT7UAWg
 }  
 
 
-MSRVTT_DATASETS = {"both_ways": { "kaggle_rand_2000" : "1H9C-PfZ61OBM-desjte5AKmW6QI28uNa",  # file_name bothway_embed_data_min_300_1.pth  
+MSRVTT_DATASETS = {"both_ways": { "kaggle_rand_2000" : "1t8xIrs3DjqDro22yEUCethaFvOxnpmc5",  # file_name bothway_embed_data_min_300_1.pth  
                                 "discription" : " embeddeed with Kand_22 torch dataset includ text_embedd and last hiden state"
                                
 
