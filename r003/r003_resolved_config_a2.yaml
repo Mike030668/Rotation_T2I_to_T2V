@@ -1,0 +1,16 @@
+arm: A2
+cosine_formula: example_one_minus_cos
+mse_formula: legacy_weighted_sum
+train_cosine_scale: D_times_mean
+dtype: float32
+normalize_eps: 1.0e-12
+eval_cutoff: 1.0e-8
+eval_cutoff_applies_to_training: false
+coverage_min_videos: 40
+coverage_denominator: 50
+exposure_mode: schedule_replay
+frame_indices: reconstructed_not_recorded
+l0_comparator: R002 LAST_seed epoch 5
+l0_runtime: torch==2.14.0+cpu
+heldout_scored: false
+seeds: [20260928, 20260929, 20260930]
