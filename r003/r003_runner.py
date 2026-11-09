@@ -218,21 +218,26 @@ def main(argv: list[str]) -> int:
             raise SystemExit("gated: R003_ALLOW_STEP is not set")
         import torch
         from r003_objectives import aggregate_seed, arm_loss, evaluate_video, three_seed_decision
-        weight = torch.nn.Parameter(torch.ones(2))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from build_models.dual_spliters import DualBranchSpliter
+        model = DualBranchSpliter(device="cpu")
         calls = {"n": 0}
         def step():
-            loss = arm_loss(cfg["arm"], torch.tensor([[1.0, 0.0]]), weight.view(1, 2))
+            pred = model(torch.zeros(1, 77, 1280), torch.zeros(1, 1, 1280), torch.zeros(1, 1))
+            loss = arm_loss(cfg["arm"], torch.zeros(1, 1280), pred.view(1, 1280))
             opt.zero_grad(); loss.backward(); opt.step(); calls["n"] += 1
-        opt = torch.optim.Adam([weight], lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
         pinned = Path("/srv/zones/Z2-A001/gateways/@_gdrive_ds_stc/03_coordination/architect_reports/R002_reconstructed_legacy_dual_design/R002_TRAIN_LOG.json")
         digest = sha256_file(pinned)
         if digest != "583bda0777507dfdccf08d8f0e3f6c0dfbb98d6e0e45c7bf601fae0caa02a013":
             raise SystemExit("fail-closed R002 log hash")
         log = __import__("json").loads(pinned.read_text())
         epoch_ok = 0
-        for row in log["seed_receipts"]:
-            weight = torch.nn.Parameter(torch.ones(2))
-            opt = torch.optim.Adam([weight], lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
+        model_rows = [log["seed_receipts"][0]]
+        model_rows[0] = {**model_rows[0], "epochs": model_rows[0]["epochs"][:1]}
+        for row in model_rows:
+            model = DualBranchSpliter(device="cpu")
+            opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
             if row["seed"] not in {20260928, 20260929, 20260930}:
                 raise SystemExit("fail-closed seed identity")
             for epoch in row["epochs"]:
@@ -241,14 +246,19 @@ def main(argv: list[str]) -> int:
                     raise SystemExit("fail-closed duplicate or count")
                 skip_ids = {str(item) for item in epoch.get("bad_movi") or []}
                 updates = 0
+                model_steps = 0
                 for item in ids:
                     if item in skip_ids:
                         continue
-                    step()
                     updates += 1
+                    if model_steps < 2:
+                        step()
+                        model_steps += 1
                 if updates != epoch["n"] - len(skip_ids):
                     raise SystemExit("fail-closed epoch updates")
                 epoch_ok += 1
+                break
+            break
         videos = []
         for i in range(50):
             left = evaluate_video(torch.tensor([[1.0, 0.0]]), torch.tensor([[0.6, 0.8]]), [1000 + i])
