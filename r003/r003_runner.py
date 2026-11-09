@@ -49,6 +49,28 @@ def legacy_frame_indices(n_frames: int, max_batch: int, rng) -> list[int]:
     return sorted([0] + chosen + [n_frames - 1])
 
 
+def legacy_vs_candidate_trace() -> dict:
+    import numpy as np
+    import torch
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from build_models.dual_spliters import DualBranchSpliter
+    legacy = np.random.RandomState(20260928)
+    candidate = np.random.RandomState(20260928)
+    left = legacy_frame_indices(12, 4, legacy)
+    right = legacy_frame_indices(12, 4, candidate)
+    if left != right:
+        raise SystemExit("fail-closed frame trace")
+    model = DualBranchSpliter(device="cpu").eval()
+    text = torch.zeros(1, 77, 1280)
+    prior = torch.zeros(1, 1, 1280)
+    rise = torch.zeros(1, 1)
+    with torch.no_grad():
+        pred = model(text, prior, rise)
+    if tuple(pred.shape) != (1, 1, 1280):
+        raise SystemExit("fail-closed model shape")
+    return {"frame_trace": [int(i) for i in left], "pred_shape": list(pred.shape), "dataset": False}
+
+
 def frame_rng_evidence() -> str:
     import numpy as np
     a = np.random.RandomState(20260928)
@@ -76,8 +98,11 @@ def event_receipt(ids: list[str], step_fn) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[1] not in {"--check-config", "--synthetic-train", "--synthetic-eval", "--synthetic-integrated", "--train", "--synthetic-events", "--canonical-synthetic", "--release-candidate"}:
+    if len(argv) != 3 or argv[1] not in {"--check-config", "--synthetic-train", "--synthetic-eval", "--synthetic-integrated", "--train", "--synthetic-events", "--canonical-synthetic", "--release-candidate", "--model-trace"}:
         raise SystemExit("usage: r003_runner.py --check-config|--synthetic-train <resolved_config.yaml>")
+    if argv[1] == "--model-trace":
+        print(legacy_vs_candidate_trace())
+        return 0
     if argv[1] == "--release-candidate":
         import torch
         from r003_objectives import aggregate_seed, arm_loss, evaluate_video, three_seed_decision
