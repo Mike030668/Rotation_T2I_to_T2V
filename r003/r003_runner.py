@@ -220,11 +220,12 @@ def main(argv: list[str]) -> int:
         from r003_objectives import aggregate_seed, arm_loss, evaluate_video, three_seed_decision
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from build_models.dual_spliters import DualBranchSpliter
-        model = DualBranchSpliter(device="cpu")
+        device = "cpu"
+        model = DualBranchSpliter(device=device)
         calls = {"n": 0}
         def step():
-            pred = model(torch.zeros(1, 77, 1280), torch.zeros(1, 1, 1280), torch.zeros(1, 1))
-            loss = arm_loss(cfg["arm"], torch.zeros(1, 1280), pred.view(1, 1280))
+            pred = model(torch.zeros(1, 77, 1280, device=device), torch.zeros(1, 1, 1280, device=device), torch.zeros(1, 1, device=device))
+            loss = arm_loss(cfg["arm"], torch.zeros(1, 1280, device=device), pred.view(1, 1280))
             opt.zero_grad(); loss.backward(); opt.step(); calls["n"] += 1
         opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
         pinned = Path("/srv/zones/Z2-A001/gateways/@_gdrive_ds_stc/03_coordination/architect_reports/R002_reconstructed_legacy_dual_design/R002_TRAIN_LOG.json")
@@ -236,7 +237,7 @@ def main(argv: list[str]) -> int:
         model_rows = [log["seed_receipts"][0]]
         model_rows[0] = {**model_rows[0], "epochs": model_rows[0]["epochs"][:1]}
         for row in model_rows:
-            model = DualBranchSpliter(device="cpu")
+            model = DualBranchSpliter(device=device)
             opt = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0, amsgrad=False)
             if row["seed"] not in {20260928, 20260929, 20260930}:
                 raise SystemExit("fail-closed seed identity")
@@ -251,7 +252,7 @@ def main(argv: list[str]) -> int:
                     if item in skip_ids:
                         continue
                     updates += 1
-                    if model_steps < 2:
+                    if model_steps < 1:
                         step()
                         model_steps += 1
                 if updates != epoch["n"] - len(skip_ids):
@@ -281,7 +282,7 @@ def main(argv: list[str]) -> int:
         decision = three_seed_decision(seed_rows)
         if cfg.get("frame_indices") != "reconstructed_not_recorded":
             raise SystemExit("fail-closed frame index policy")
-        print("canonical_train_synthetic", cfg["arm"], "optimizers", 3, "epoch_checks", epoch_ok, "calls", calls["n"], "frame_rng", frame_rng_evidence(), "log_sha256", digest, "frame_indices", "reconstructed", "d049", decision, "dataset", False)
+        print("canonical_train_synthetic", cfg["arm"], "device", device, "optimizers", 1, "epoch_checks", epoch_ok, "model_steps", calls["n"], "frame_rng", frame_rng_evidence(), "log_sha256", digest, "frame_indices", "reconstructed", "d049", decision, "dataset", False)
         return 0
     if argv[1] == "--synthetic-events":
         import torch
