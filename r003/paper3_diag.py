@@ -26,6 +26,20 @@ def h1_status(gaps: list[float], mean_change_gap: float, coverage: int, total: i
     return "FAIL"
 
 
+def video_record_status(record: dict) -> str:
+    if record.get("video_id") is None or record.get("horizon") not in {1, 2, 4}:
+        return "INVALID"
+    pred = record.get("pred_delta") or []
+    true = record.get("true_delta") or []
+    if len(pred) != len(true) or not pred:
+        return "INVALID"
+    if any(x != x or y != y for x, y in zip(pred, true)):
+        return "INVALID"
+    if cosine(pred, true) != cosine(pred, true):
+        return "INCONCLUSIVE"
+    return "DEFINED"
+
+
 def paired_permutation(scores: list[float], pairs: list[tuple[int, int]], rng) -> str:
     if len(scores) < 40 or len(pairs) != len(scores):
         return "INCONCLUSIVE"

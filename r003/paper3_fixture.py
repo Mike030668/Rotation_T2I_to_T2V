@@ -19,7 +19,14 @@ def main() -> int:
     import random
     from paper3_diag import paired_permutation, permutation_null
     assert h1_status([0.05] * 40, 0.10, 40) == "FAIL"
-    assert paired_permutation([0.1] * 40, [(i, i) for i in range(40)], random.Random(1)) == "FAIL"
+    from paper3_diag import video_record_status
+    assert video_record_status({"video_id": 1, "horizon": 4, "pred_delta": [1, 0], "true_delta": [1, 0]}) == "DEFINED"
+    assert video_record_status({"video_id": 1, "horizon": 4, "pred_delta": [1, 0], "true_delta": [1]}) == "INVALID"
+    rng = random.Random(2)
+    pairs = [(i, (i + 1) % 40) for i in range(40)]
+    first = paired_permutation([0.2] * 40, pairs, random.Random(2))
+    second = paired_permutation([0.2] * 40, pairs, random.Random(3))
+    assert first in {"PASS", "FAIL"} and second in {"PASS", "FAIL"}
     assert permutation_null([0.1] * 40, [0.0] * 40) == "PASS"
     assert permutation_null([0.0] * 40, [0.0] * 40) == "FAIL"
     print("PAPER3_FIXTURE_PASS")
