@@ -21,9 +21,21 @@ def h1_status(gaps: list[float], mean_change_gap: float, coverage: int, total: i
     if len(defined) < 40 or coverage < 40:
         return "INCONCLUSIVE"
     median = sorted(defined)[len(defined) // 2]
-    if median >= 0.02 and abs(median - mean_change_gap) >= 0.02:
+    if median - mean_change_gap >= 0.02 and median >= 0.02:
         return "PASS"
     return "FAIL"
+
+
+def paired_permutation(scores: list[float], pairs: list[tuple[int, int]], rng) -> str:
+    if len(scores) < 40 or len(pairs) != len(scores):
+        return "INCONCLUSIVE"
+    shuffled = list(pairs)
+    rng.shuffle(shuffled)
+    gaps = [scores[i] - scores[j] for i, j in shuffled]
+    if any(g != g for g in gaps):
+        return "INVALID"
+    median = sorted(gaps)[len(gaps) // 2]
+    return "PASS" if median >= 0.02 else "FAIL"
 
 
 def permutation_null(true_scores: list[float], shuffled_scores: list[float]) -> str:
@@ -38,7 +50,7 @@ def permutation_null(true_scores: list[float], shuffled_scores: list[float]) -> 
 def h2_status(teacher: float, free: float, motion: float, copy_motion: float = 0.0) -> str:
     if teacher != teacher or free != free:
         return "INCONCLUSIVE"
-    if motion <= copy_motion:
+    if motion < 0.02 or motion <= copy_motion:
         return "FAIL"
     if teacher - free >= 0.02:
         return "PASS"

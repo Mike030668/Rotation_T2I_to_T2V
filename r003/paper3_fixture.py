@@ -16,7 +16,10 @@ def main() -> int:
     assert h2_status(0.10, 0.07, 0.2) == "PASS"
     assert h2_status(0.10, 0.09, 0.2) == "FAIL"
     assert h2_status(0.10, 0.07, 0.0) == "FAIL"
-    from paper3_diag import permutation_null
+    import random
+    from paper3_diag import paired_permutation, permutation_null
+    assert h1_status([0.05] * 40, 0.10, 40) == "FAIL"
+    assert paired_permutation([0.1] * 40, [(i, i) for i in range(40)], random.Random(1)) == "FAIL"
     assert permutation_null([0.1] * 40, [0.0] * 40) == "PASS"
     assert permutation_null([0.0] * 40, [0.0] * 40) == "FAIL"
     print("PAPER3_FIXTURE_PASS")
