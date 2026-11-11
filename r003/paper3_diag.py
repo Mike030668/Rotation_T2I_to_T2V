@@ -26,6 +26,24 @@ def h1_status(gaps: list[float], mean_change_gap: float, coverage: int, total: i
     return "FAIL"
 
 
+def evaluate_manifest(records: list[dict]) -> dict:
+    if len(records) != 50 or len({r.get("video_id") for r in records}) != 50:
+        return {"status": "INVALID", "coverage": 0}
+    gaps = []
+    for record in records:
+        if video_record_status(record) == "INVALID":
+            return {"status": "INVALID", "coverage": 0}
+        gap = directional_gap(record["pred_delta"], record["true_delta"], record["distractor_delta"])
+        if gap == gap:
+            gaps.append(gap)
+    if len(gaps) < 40:
+        return {"status": "INCONCLUSIVE", "coverage": len(gaps)}
+    ordered = sorted(gaps)
+    median = ordered[len(ordered) // 2]
+    status = "PASS" if median >= 0.02 else "FAIL"
+    return {"status": status, "coverage": len(gaps), "median": median}
+
+
 def video_record_status(record: dict) -> str:
     if record.get("video_id") is None or record.get("horizon") not in {1, 2, 4}:
         return "INVALID"
