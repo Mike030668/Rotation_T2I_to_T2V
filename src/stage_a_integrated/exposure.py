@@ -59,6 +59,8 @@ def require_records(records: list, completed: int) -> None:
                 raise ValueError("ids_frames does not match the pinned synthetic source")
             if current_ord not in ordinals or target_ord in ordinals:
                 raise ValueError("observed prefix must contain current and exclude target")
+            if len(ordinals) != len(labels):
+                raise ValueError("selected ordinals and labels have different lengths")
             if any(frame_labels[ordinal] != label for ordinal, label in zip(ordinals, labels)):
                 raise ValueError("selected ordinal does not match the pinned source label")
             if frame_labels[current_ord] != current or frame_labels[target_ord] != target:
