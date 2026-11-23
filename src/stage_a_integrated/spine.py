@@ -29,18 +29,18 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     epoch = 0
     cursor = 0
     best = None
+    macros = {}
+    events = []
+    exposure = []
     if config.get("resume_bytes"):
         restored = resume(config["resume_bytes"], model, opt)
         completed = int(restored["completed"])
         epoch = int(restored["epoch"])
         cursor = int(restored["cursor"])
         best = restored["best"]
-        events = list(restored["events"])
-        macros = dict(restored["macros"])
+        events = [int(event) for event in restored["events"]]
+        macros = {int(step): float(value) for step, value in restored["macros"].items()}
         exposure = list(restored["exposure"])
-    macros = {}
-    events = []
-    exposure = []
     root = Path(release.get("output_root"))
     items = dev_items(rows)
     while completed < int(config["max_updates"]):
