@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+PINNED_SYNTHETIC_LABELS = [0, 2, 9, 10, 40]
 REQUIRED = (
     "selected_ordinals",
     "selected_labels",
@@ -51,10 +52,14 @@ def require_records(records: list, completed: int) -> None:
         )
         if any(len(row) == 0 for row in (record["selected_ordinals"], record["selected_labels"])):
             raise ValueError("exposure row is empty")
+        if len({len(record[key]) for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon")}) != 1:
+            raise ValueError("exposure columns have different lengths")
         for ordinals, labels, current_ord, target_ord, current, target, frame_labels in rows:
+            if frame_labels != PINNED_SYNTHETIC_LABELS:
+                raise ValueError("ids_frames does not match the pinned synthetic source")
             if current_ord not in ordinals or target_ord in ordinals:
                 raise ValueError("observed prefix must contain current and exclude target")
+            if any(frame_labels[ordinal] != label for ordinal, label in zip(ordinals, labels)):
+                raise ValueError("selected ordinal does not match the pinned source label")
             if frame_labels[current_ord] != current or frame_labels[target_ord] != target:
-                raise ValueError("current or target label does not match ids_frames")
-            if labels[ordinals.index(current_ord)] != current:
-                raise ValueError("current ordinal does not match its label")
+                raise ValueError("current or target label does not match the pinned source")
