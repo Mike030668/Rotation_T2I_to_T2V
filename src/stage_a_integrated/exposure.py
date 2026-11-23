@@ -25,6 +25,8 @@ def require_item(item: dict) -> None:
         raise ValueError("batch item is not exposure-v1")
     if not _labels_match(item["selected_ordinals"], item["selected_labels"], item["ids_frames"]):
         raise ValueError("selected ordinal does not match the original frame label")
+    if item["current_ordinal"] not in item["selected_ordinals"] or item["target_ordinal"] in item["selected_ordinals"]:
+        raise ValueError("observed prefix must contain current and exclude target")
     if item["ids_frames"][item["current_ordinal"]] != item["current"] or item["ids_frames"][item["target_ordinal"]] != item["target"]:
         raise ValueError("current or target ordinal does not match its label")
 
@@ -49,5 +51,7 @@ def require_records(records: list, completed: int) -> None:
         if any(len(row) == 0 for row in (record["selected_ordinals"], record["selected_labels"])):
             raise ValueError("exposure row is empty")
         for ordinals, labels, current_ord, target_ord, current, target in rows:
-            if labels[ordinals.index(current_ord)] != current or labels[ordinals.index(target_ord)] != target:
-                raise ValueError("exposure ordinal does not match its label")
+            if current_ord not in ordinals or target_ord in ordinals:
+                raise ValueError("observed prefix must contain current and exclude target")
+            if labels[ordinals.index(current_ord)] != current:
+                raise ValueError("current ordinal does not match its label")
