@@ -37,7 +37,7 @@ def require_records(records: list, completed: int) -> None:
     for index, record in enumerate(records, start=1):
         if record.get("schema") != "exposure-v1" or record.get("completed") != index or record.get("provider") != "SYNTHETIC_APPARATUS":
             raise ValueError("exposure schema or step mismatch")
-        for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "horizon", "epoch", "cursor", "seed"):
+        for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon", "epoch", "cursor", "seed"):
             if key not in record or record[key] in (None, []):
                 raise ValueError("exposure record is missing required fields")
         rows = zip(
@@ -47,11 +47,14 @@ def require_records(records: list, completed: int) -> None:
             record["target_ordinal"],
             record["current"],
             record["target"],
+            record["ids_frames"],
         )
         if any(len(row) == 0 for row in (record["selected_ordinals"], record["selected_labels"])):
             raise ValueError("exposure row is empty")
-        for ordinals, labels, current_ord, target_ord, current, target in rows:
+        for ordinals, labels, current_ord, target_ord, current, target, frame_labels in rows:
             if current_ord not in ordinals or target_ord in ordinals:
                 raise ValueError("observed prefix must contain current and exclude target")
+            if frame_labels[current_ord] != current or frame_labels[target_ord] != target:
+                raise ValueError("current or target label does not match ids_frames")
             if labels[ordinals.index(current_ord)] != current:
                 raise ValueError("current ordinal does not match its label")

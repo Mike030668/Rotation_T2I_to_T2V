@@ -62,6 +62,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             "target_ordinal": [item["target_ordinal"] for item in batch],
             "current": [item["current"] for item in batch],
             "target": [item["target"] for item in batch],
+            "ids_frames": [item["ids_frames"] for item in batch],
             "horizon": [item["horizon"] for item in batch],
             "epoch": epoch,
             "cursor": cursor,
