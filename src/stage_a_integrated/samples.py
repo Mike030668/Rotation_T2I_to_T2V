@@ -57,8 +57,13 @@ def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], curr
 
 
 def assert_no_target_leak(item: dict) -> None:
-    before = repr(item["model_kwargs"])
-    mutated = dict(item)
-    mutated["supervision"] = {key: value + 1 for key, value in item["supervision"].items()}
-    if repr(mutated["model_kwargs"]) != before:
-        raise ValueError("target mutation changed model kwargs")
+    rebuilt = synthetic_item(
+        item["id_movi"],
+        item["ids_frames"],
+        item["history"],
+        item["current"],
+        item["target"],
+        item["horizon"],
+    )
+    if repr(rebuilt["model_kwargs"]) != repr(item["model_kwargs"]):
+        raise ValueError("model kwargs were not rebuilt from source labels")

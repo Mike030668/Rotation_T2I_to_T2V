@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from ..stage_a_integrated.authorization import ExecutionNotAuthorized
-from ..stage_a_integrated.checkpoints import unpack
+from stage_a_integrated.authorization import ExecutionNotAuthorized
+from stage_a_integrated.checkpoints import unpack
+from stage_a_integrated.spine import run_synthetic
 
 A_MACROS = {32: 0.50, 64: 0.40, 96: 0.45, 128: 0.47}
 
