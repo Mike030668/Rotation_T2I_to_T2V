@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .authorization import ExecutionNotAuthorized, load
@@ -50,8 +51,10 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed_next = completed + 1
-        record = receipt(batch, completed_next, epoch, cursor, int(config["seed"]))
+        record = json.loads(json.dumps(receipt(batch, completed_next, epoch, cursor, int(config["seed"]))))
         require_record(record, completed_next)
+        if record["videos"] != chosen or record["seed"] != int(config["seed"]) or record["epoch"] != epoch:
+            raise ValueError("receipt does not match the sampler selection")
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         exposure.append(record)
         if completed in config["dev_events"]:
