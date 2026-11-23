@@ -48,4 +48,7 @@ def evaluate(model, items: list[dict], expected: set[tuple]) -> float:
     if seen != expected or len(grouped) != 50:
         raise ValueError("dev coverage mismatch")
     means = [sum(values) / len(values) for values in grouped.values()]
-    return sum(means) / 50.0
+    value = sum(means) / 50.0
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("nonfinite dev macro")
+    return value

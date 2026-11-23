@@ -36,8 +36,12 @@ def load(release_path: str, trust_anchor_path: str, expected: dict) -> VerifiedR
     required = ("allows_execution", "package", "scope", "device", "budget", "max_updates", "output_root", "nonce", "expires", "signature")
     if any(key not in release for key in required):
         raise ExecutionNotAuthorized("release receipt is incomplete")
-    if release["allows_execution"] is not True or release["scope"] != expected["scope"] or release["device"] != expected["device"]:
+    if release["allows_execution"] is not True or release["package"] != "stage_a_integrated":
+        raise ExecutionNotAuthorized("release package mismatch")
+    if release["scope"] != expected["scope"] or release["device"] != expected["device"]:
         raise ExecutionNotAuthorized("release scope mismatch")
+    if int(release["max_updates"]) != int(expected["max_updates"]) or release["budget"] != expected["budget"]:
+        raise ExecutionNotAuthorized("release budget mismatch")
     if release["expires"] < expected["now"] or release["nonce"] in expected.get("used_nonces", []):
         raise ExecutionNotAuthorized("release expired or replayed")
     body = {key: release[key] for key in sorted(release) if key != "signature"}

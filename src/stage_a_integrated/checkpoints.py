@@ -53,7 +53,13 @@ def publish(root: Path, generation_id: str, role: str, payload: bytes) -> None:
     generations.mkdir(parents=True, exist_ok=True)
     stage = root / "stage" / f"{generation_id}-{role}"
     stage.mkdir(parents=True, exist_ok=False)
-    (stage / "checkpoint.bin").write_bytes(payload)
+    target = stage / "checkpoint.bin"
+    target.write_bytes(payload)
+    fd = os.open(target, os.O_RDONLY)
+    os.fsync(fd)
+    os.close(fd)
+    if target.read_bytes() != payload:
+        raise ValueError("staged readback mismatch")
     final = generations / f"{generation_id}-{role}"
     os.rename(stage, final)
     if (final / "checkpoint.bin").read_bytes() != payload:
