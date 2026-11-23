@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .samples import synthetic_item
+from .stage_a_sampler_v2 import sample
 
 
 def train_ids() -> list[str]:
@@ -16,9 +17,10 @@ def next_batch(seed: int, epoch: int, cursor: int, batch: int) -> tuple[list[dic
     chosen = [ids[(seed + epoch + cursor + offset) % len(ids)] for offset in range(batch)]
     items = []
     for video in chosen:
-        video_id = int(video.split("-")[1])
-        labels = [0, 2 + (video_id % 3), 9, 10, 40 + (video_id % 5)]
-        items.append(synthetic_item(video, labels, [labels[0], labels[1]], labels[2], labels[3], "near"))
+        labels = [0, 2, 9, 10, 40]
+        indices, history = sample(labels, video, epoch, seed)
+        current, target = indices[-2], indices[-1]
+        items.append(synthetic_item(video, labels, list(history[current]), labels[current], labels[target], "near"))
     return items, cursor + batch, chosen
 
 
