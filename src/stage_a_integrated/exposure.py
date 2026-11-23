@@ -78,6 +78,8 @@ def require_records(records: list, completed: int) -> None:
         for ordinals, labels, current_ord, target_ord, current, target, frame_labels in rows:
             if frame_labels != PINNED_SYNTHETIC_LABELS:
                 raise ValueError("ids_frames does not match the pinned synthetic source")
+            if type(ordinals) is not list or not ordinals:
+                raise ValueError("observed prefix is empty")
             _bounded([current_ord, target_ord, *ordinals], len(frame_labels))
             if any(type(value) is not int or isinstance(value, bool) or value < 0 for value in ordinals):
                 raise ValueError("ordinal is not a nonnegative int")
