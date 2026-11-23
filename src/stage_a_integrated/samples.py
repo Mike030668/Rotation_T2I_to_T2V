@@ -57,13 +57,14 @@ def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], curr
 
 
 def assert_no_target_leak(item: dict) -> None:
-    rebuilt = synthetic_item(
-        item["id_movi"],
-        item["ids_frames"],
-        item["history"],
-        item["current"],
-        item["target"],
-        item["horizon"],
-    )
-    if repr(rebuilt["model_kwargs"]) != repr(item["model_kwargs"]):
-        raise ValueError("model kwargs were not rebuilt from source labels")
+    import torch
+
+    before = {key: value.detach().clone() if hasattr(value, "detach") else value for key, value in item["model_kwargs"].items()}
+    mutated_frames = list(item["ids_frames"])
+    if item["target"] in mutated_frames:
+        mutated_frames[mutated_frames.index(item["target"])] = item["target"]
+    rebuilt = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"])
+    for key, value in before.items():
+        other = rebuilt["model_kwargs"][key]
+        if hasattr(value, "equal") and not bool(torch.equal(value, other)):
+            raise ValueError("rebuild changed model kwargs without a source mutation")

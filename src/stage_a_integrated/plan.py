@@ -1,4 +1,4 @@
-"""Synthetic 400-id exposure. Does not read the historical corpus."""
+"""SYNTHETIC_APPARATUS. Not a frozen historical replay. No corpus read."""
 
 from __future__ import annotations
 
@@ -6,23 +6,32 @@ from .samples import synthetic_item
 
 
 def train_ids() -> list[str]:
-    return [str(index) for index in range(400)]
+    return [f"syn-{index:04d}" for index in range(400)]
 
 
-def next_batch(seed: int, epoch: int, cursor: int, batch: int) -> tuple[list[dict], int]:
+def next_batch(seed: int, epoch: int, cursor: int, batch: int) -> tuple[list[dict], int, list[str]]:
+    if batch < 1:
+        raise ValueError("batch must be positive")
     ids = train_ids()
-    start = (seed + epoch + cursor) % len(ids)
-    chosen = [ids[(start + offset) % len(ids)] for offset in range(batch)]
-    items = [synthetic_item(video, [0, 2, 9, 10, 40], [0, 2], 9, 10, "near") for video in chosen]
-    return items, cursor + batch
-
-
-def dev_items(keys: set[tuple]) -> list[dict]:
+    chosen = [ids[(seed + epoch + cursor + offset) % len(ids)] for offset in range(batch)]
     items = []
-    for id_movi, current, target, horizon in sorted(keys):
-        labels = sorted({0, int(current), int(target)})
-        history = [label for label in labels if label <= int(current)]
-        items.append(synthetic_item(str(id_movi), labels, history, int(current), int(target), horizon))
+    for video in chosen:
+        video_id = int(video.split("-")[1])
+        labels = [0, 2 + (video_id % 3), 9, 10, 40 + (video_id % 5)]
+        items.append(synthetic_item(video, labels, [labels[0], labels[1]], labels[2], labels[3], "near"))
+    return items, cursor + batch, chosen
+
+
+def dev_items(rows: list[dict]) -> list[dict]:
+    items = []
+    for row in rows:
+        labels = list(range(int(row["n"])))
+        history = [int(frame) for frame in row["history"]]
+        current = int(row["current"])
+        for horizon in ("near", "mid", "far"):
+            if row.get(horizon) is None:
+                continue
+            items.append(synthetic_item(str(row["id_movi"]), labels, history, current, int(row[horizon]), horizon))
     if len(items) != 147:
         raise ValueError("synthetic dev provider is not 147 pairs")
     return items

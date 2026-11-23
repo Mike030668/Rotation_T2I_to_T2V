@@ -11,11 +11,18 @@ from . import HORIZONS_SHA256
 BETA = 0.05
 
 
-def load_keys(path: Path) -> set[tuple]:
+def load_rows(path: Path) -> list[dict]:
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != HORIZONS_SHA256:
         raise ValueError("horizons SHA mismatch")
     rows = json.loads(raw.decode("utf-8"))["rows"]
+    if len(rows) != 50:
+        raise ValueError("dev manifest is not 50 videos")
+    return rows
+
+
+def load_keys(path: Path) -> set[tuple]:
+    rows = load_rows(path)
     keys = []
     for row in rows:
         for horizon in ("near", "mid", "far"):

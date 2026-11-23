@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import pack, publish
-from .dev import evaluate, load_keys
+from .dev import evaluate, load_keys, load_rows
 from .model_adapter import load_class
 from .plan import dev_items, next_batch
 from .trainer import optimizer_step
@@ -23,6 +23,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     model_cls, config_cls = load_class()
     model = model_cls(config_cls())
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    rows = load_rows(Path(config["horizons_path"]))
     keys = load_keys(Path(config["horizons_path"]))
     completed = 0
     epoch = 0
@@ -30,12 +31,12 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     best = None
     macros = {}
     root = Path(release.get("output_root"))
-    items = dev_items(keys)
+    items = dev_items(rows)
     while completed < int(config["max_updates"]):
         if cursor + int(config["batch"]) > 400:
             epoch += 1
             cursor = 0
-        batch, cursor = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
+        batch, cursor, _chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
