@@ -78,11 +78,16 @@ def receipt(batch: list[dict], completed: int, epoch: int, cursor: int, seed: in
 def replay_ordinals(record: dict) -> None:
     from .stage_a_sampler_v2 import sample
 
-    for video, ordinals, frame_labels in zip(record["videos"], record["selected_ordinals"], record["ids_frames"]):
+    for video, ordinals, frame_labels, current_ord, target_ord in zip(
+        record["videos"],
+        record["selected_ordinals"],
+        record["ids_frames"],
+        record["current_ordinal"],
+        record["target_ordinal"],
+    ):
         sampled, history = sample(frame_labels, video, record["epoch"], record["seed"])
-        current_ord = sampled[-2]
-        if list(history[current_ord]) != ordinals:
-            raise ValueError("exposure ordinals do not match the frozen sampler")
+        if sampled[-2] != current_ord or sampled[-1] != target_ord or list(history[sampled[-2]]) != ordinals:
+            raise ValueError("exposure selection does not match the frozen sampler")
 
 
 def require_record(record: dict, expected_step: int) -> None:
