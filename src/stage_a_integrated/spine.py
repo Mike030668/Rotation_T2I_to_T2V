@@ -35,25 +35,42 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         epoch = int(restored["epoch"])
         cursor = int(restored["cursor"])
         best = restored["best"]
+        events = list(restored["events"])
+        macros = dict(restored["macros"])
+        exposure = list(restored["exposure"])
     macros = {}
+    events = []
+    exposure = []
     root = Path(release.get("output_root"))
     items = dev_items(rows)
     while completed < int(config["max_updates"]):
         if cursor + int(config["batch"]) > 400:
             epoch += 1
             cursor = 0
-        batch, cursor, _chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
+        batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
+        exposure.append({"completed": completed, "videos": chosen})
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
             model.train()
             macros[completed] = value
             if best is None or value < best[1]:
                 best = (completed, value)
+            events.append(completed)
             history = [] if best is None else [{"step": best[0], "macro": best[1]}]
             payload = pack(
-                {"completed": completed, "epoch": epoch, "cursor": cursor, "macro": value, "best_step": None if best is None else best[0], "best_macro": None if best is None else best[1], "best_history": history, "events": sorted(macros)},
-                _sections(model, opt, completed, epoch, cursor),
+                {
+                    "completed": completed,
+                    "epoch": epoch,
+                    "cursor": cursor,
+                    "macro": value,
+                    "best_step": None if best is None else best[0],
+                    "best_macro": None if best is None else best[1],
+                    "best_history": history,
+                    "events": events,
+                    "macros": macros,
+                },
+                _sections(model, opt, completed, epoch, cursor, exposure),
             )
             publish(root, f"u{completed}", "LAST", payload)
             if best is not None and best[0] == completed:
@@ -63,7 +80,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         "best_step": None if best is None else best[0],
         "last_step": completed,
         "macros": macros,
-        "events": sorted(macros),
+        "events": events,
         "observed": False,
     }
 
@@ -101,10 +118,12 @@ def resume(payload: bytes, model, opt) -> dict:
         "cursor": header["cursor"],
         "best": None if header["best_step"] is None else (header["best_step"], header["best_macro"]),
         "events": header["events"],
+        "macros": header["macros"],
+        "exposure": json.loads(decoded["exposure"].decode("utf-8")),
     }
 
 
-def _sections(model, opt, completed: int, epoch: int, cursor: int) -> dict[str, bytes]:
+def _sections(model, opt, completed: int, epoch: int, cursor: int, exposure: list) -> dict[str, bytes]:
     import io
     import json
     import random
@@ -123,7 +142,7 @@ def _sections(model, opt, completed: int, epoch: int, cursor: int) -> dict[str, 
         "numpy_rng": json.dumps(_numpy_state()).encode("utf-8"),
         "torch_rng": bytes(torch.get_rng_state().tolist()),
         "sampler": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
-        "exposure": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
+        "exposure": json.dumps(exposure).encode("utf-8"),
     }
 
 

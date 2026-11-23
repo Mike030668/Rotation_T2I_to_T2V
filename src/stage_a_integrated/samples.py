@@ -22,7 +22,8 @@ def _image(id_movi: str, ids_frames: list[int]):
     video = int(hashlib.sha256(id_movi.encode("utf-8")).hexdigest()[:8], 16)
     rows = []
     for frame in ids_frames:
-        rows.append(((torch.arange(WIDTH, dtype=torch.float32) * 17) + float(video % 997) + float(frame * 13)) / 996.0)
+        phase = float((video + frame * 13) % 997)
+        rows.append((torch.arange(WIDTH, dtype=torch.float32) * phase + float(frame)) / 996.0)
     return torch.stack(rows)
 
 
