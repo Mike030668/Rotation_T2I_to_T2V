@@ -7,7 +7,7 @@ from pathlib import Path
 from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import pack, publish, unpack
 from .dev import evaluate, load_keys, load_rows
-from .exposure import require_item, require_records
+from .exposure import receipt, require_records
 from .model_adapter import load_class
 from .plan import dev_items, next_batch
 from .trainer import optimizer_step
@@ -49,26 +49,11 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             epoch += 1
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
-        for item in batch:
-            require_item(item)
+        completed_next = completed + 1
+        record = receipt(batch, completed_next, epoch, cursor, int(config["seed"]))
+        require_records([record], 1)
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
-        exposure.append({
-            "schema": "exposure-v1",
-            "completed": completed,
-            "videos": chosen,
-            "selected_ordinals": [item["selected_ordinals"] for item in batch],
-            "selected_labels": [item["selected_labels"] for item in batch],
-            "current_ordinal": [item["current_ordinal"] for item in batch],
-            "target_ordinal": [item["target_ordinal"] for item in batch],
-            "current": [item["current"] for item in batch],
-            "target": [item["target"] for item in batch],
-            "ids_frames": [item["ids_frames"] for item in batch],
-            "horizon": [item["horizon"] for item in batch],
-            "epoch": epoch,
-            "cursor": cursor,
-            "seed": int(config["seed"]),
-            "provider": "SYNTHETIC_APPARATUS",
-        })
+        exposure.append(record)
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
             model.train()

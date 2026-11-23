@@ -53,6 +53,28 @@ def require_item(item: dict) -> None:
         raise ValueError("current or target ordinal does not match its label")
 
 
+def receipt(batch: list[dict], completed: int, epoch: int, cursor: int, seed: int) -> dict:
+    for item in batch:
+        require_item(item)
+    return {
+        "schema": "exposure-v1",
+        "completed": completed,
+        "videos": [item["id_movi"] for item in batch],
+        "selected_ordinals": [item["selected_ordinals"] for item in batch],
+        "selected_labels": [item["selected_labels"] for item in batch],
+        "current_ordinal": [item["current_ordinal"] for item in batch],
+        "target_ordinal": [item["target_ordinal"] for item in batch],
+        "current": [item["current"] for item in batch],
+        "target": [item["target"] for item in batch],
+        "ids_frames": [item["ids_frames"] for item in batch],
+        "horizon": [item["horizon"] for item in batch],
+        "epoch": epoch,
+        "cursor": cursor,
+        "seed": seed,
+        "provider": "SYNTHETIC_APPARATUS",
+    }
+
+
 def require_records(records: list, completed: int) -> None:
     if len(records) != completed:
         raise ValueError("exposure length does not match completed")
