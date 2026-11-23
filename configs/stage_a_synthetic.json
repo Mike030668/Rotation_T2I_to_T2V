@@ -1,0 +1,13 @@
+{
+  "status": "NOT_RUN",
+  "package": "stage_a_integrated",
+  "data": "synthetic",
+  "max_updates": 128,
+  "batch": 4,
+  "seed": 17,
+  "dev_events": [32, 64, 96, 128],
+  "candidate_sha256": "43937fdda6c81a8af73d642f73a9dfc03fb077dafe8b24faac6daed029a881ef",
+  "loss_sha256": "ce7ccc063c8e8e1a8e7654b90cd00c2dd8ab37bfe605f82fa6c01f95a4056f0e",
+  "horizons_sha256": "b7ad9bb1979285043c62c0e174b7b6515daa843ad97131444928b9a02e1de412",
+  "release_created": false
+}
