@@ -99,6 +99,8 @@ def _admit(decoded: dict) -> dict:
         if not math.isfinite(float(value)):
             raise ValueError("nonfinite restored macro")
     numeric = {int(step): float(value) for step, value in macros.items()}
+    if type(header["completed"]) is not int or any(event > header["completed"] for event in events):
+        raise ValueError("event is after completed step")
     if events and header["best_step"] is None:
         raise ValueError("best is missing while events exist")
     if header["best_step"] is not None:
