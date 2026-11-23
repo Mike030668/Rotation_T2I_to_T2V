@@ -15,6 +15,11 @@ REQUIRED = (
 )
 
 
+def _ordinal(value) -> None:
+    if type(value) is not int or isinstance(value, bool) or value < 0:
+        raise ValueError("ordinal is not a nonnegative int")
+
+
 def _labels_match(ordinals: list[int], labels: list[int], frame_labels: list[int]) -> bool:
     if len(ordinals) != len(labels):
         return False
@@ -26,6 +31,8 @@ def require_item(item: dict) -> None:
         raise ValueError("batch item is not exposure-v1")
     if not _labels_match(item["selected_ordinals"], item["selected_labels"], item["ids_frames"]):
         raise ValueError("selected ordinal does not match the original frame label")
+    _ordinal(item["current_ordinal"])
+    _ordinal(item["target_ordinal"])
     ordinals = item["selected_ordinals"]
     if any(type(value) is not int or isinstance(value, bool) or value < 0 for value in ordinals):
         raise ValueError("ordinal is not a nonnegative int")
@@ -62,6 +69,8 @@ def require_records(records: list, completed: int) -> None:
         for ordinals, labels, current_ord, target_ord, current, target, frame_labels in rows:
             if frame_labels != PINNED_SYNTHETIC_LABELS:
                 raise ValueError("ids_frames does not match the pinned synthetic source")
+            _ordinal(current_ord)
+            _ordinal(target_ord)
             if any(type(value) is not int or isinstance(value, bool) or value < 0 for value in ordinals):
                 raise ValueError("ordinal is not a nonnegative int")
             if ordinals != sorted(set(ordinals)) or ordinals[-1] != current_ord or target_ord <= current_ord:
