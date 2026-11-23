@@ -75,6 +75,12 @@ def receipt(batch: list[dict], completed: int, epoch: int, cursor: int, seed: in
     }
 
 
+def require_record(record: dict, expected_step: int) -> None:
+    require_records([dict(record, completed=1)], 1)
+    if record.get("completed") != expected_step:
+        raise ValueError("proposed exposure step is not the next update")
+
+
 def require_records(records: list, completed: int) -> None:
     if len(records) != completed:
         raise ValueError("exposure length does not match completed")

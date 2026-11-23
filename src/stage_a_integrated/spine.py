@@ -7,7 +7,7 @@ from pathlib import Path
 from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import pack, publish, unpack
 from .dev import evaluate, load_keys, load_rows
-from .exposure import receipt, require_records
+from .exposure import receipt, require_record, require_records
 from .model_adapter import load_class
 from .plan import dev_items, next_batch
 from .trainer import optimizer_step
@@ -51,7 +51,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed_next = completed + 1
         record = receipt(batch, completed_next, epoch, cursor, int(config["seed"]))
-        require_records([record], 1)
+        require_record(record, completed_next)
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         exposure.append(record)
         if completed in config["dev_events"]:
