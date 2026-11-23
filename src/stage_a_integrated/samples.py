@@ -14,7 +14,17 @@ def schedule(ids_frames: list[int], current_label: int, target_label: int) -> li
     return [local, (target_label - origin) / span, (current_label - origin) / span, (target_label - origin) / span, abs(local)]
 
 
-def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], current: int, target: int, horizon: str):
+def _image(id_movi: str, ids_frames: list[int]):
+    import torch
+
+    video = sum(ord(char) for char in id_movi)
+    rows = []
+    for frame in ids_frames:
+        rows.append(torch.arange(WIDTH, dtype=torch.float32) + float(video * 17 + frame))
+    return torch.stack(rows) / 997.0
+
+
+def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], current: int, target: int, horizon: str, image=None):
     if len(set(ids_frames)) != len(ids_frames) or ids_frames != sorted(ids_frames):
         raise ValueError("ids_frames must be strictly increasing")
     if target in history or any(frame > current for frame in history):
@@ -22,7 +32,8 @@ def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], curr
     ordinal = {label: index for index, label in enumerate(ids_frames)}
     import torch
 
-    image = torch.arange(len(ids_frames) * WIDTH, dtype=torch.float32).reshape(len(ids_frames), WIDTH) / 997.0
+    if image is None:
+        image = _image(id_movi, ids_frames)
     anchor = image[:1]
     proxy = anchor + (image - image[:1])
     hidden = torch.arange(WIDTH, dtype=torch.float32).reshape(1, WIDTH) / 996.0
@@ -59,12 +70,12 @@ def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], curr
 def assert_no_target_leak(item: dict) -> None:
     import torch
 
-    before = {key: value.detach().clone() if hasattr(value, "detach") else value for key, value in item["model_kwargs"].items()}
-    mutated_frames = list(item["ids_frames"])
-    if item["target"] in mutated_frames:
-        mutated_frames[mutated_frames.index(item["target"])] = item["target"]
-    rebuilt = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"])
-    for key, value in before.items():
-        other = rebuilt["model_kwargs"][key]
-        if hasattr(value, "equal") and not bool(torch.equal(value, other)):
-            raise ValueError("rebuild changed model kwargs without a source mutation")
+    image = _image(item["id_movi"], item["ids_frames"])
+    mutated = image.clone()
+    mutated[item["ids_frames"].index(item["target"])] += 1.0
+    clean = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], image)
+    dirty = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], mutated)
+    if not bool(torch.equal(clean["model_kwargs"]["current_latent"], dirty["model_kwargs"]["current_latent"])):
+        raise ValueError("target-frame mutation changed a model input")
+    if bool(torch.equal(clean["supervision"]["target_delta_local"], dirty["supervision"]["target_delta_local"])):
+        raise ValueError("target-frame mutation did not change supervision")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .authorization import ExecutionNotAuthorized, load
-from .checkpoints import pack, publish
+from .checkpoints import pack, publish, unpack
 from .dev import evaluate, load_keys, load_rows
 from .model_adapter import load_class
 from .plan import dev_items, next_batch
@@ -29,6 +29,12 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     epoch = 0
     cursor = 0
     best = None
+    if config.get("resume_bytes"):
+        restored = resume(config["resume_bytes"], model, opt)
+        completed = int(restored["completed"])
+        epoch = int(restored["epoch"])
+        cursor = int(restored["cursor"])
+        best = restored["best"]
     macros = {}
     root = Path(release.get("output_root"))
     items = dev_items(rows)
@@ -42,8 +48,8 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             value = evaluate(model, items, keys)
             model.train()
             payload = pack(
-                {"completed": completed, "macro": value, "best_history": [] if best is None else [best[0]]},
-                _sections(model, opt, completed),
+                {"completed": completed, "epoch": epoch, "cursor": cursor, "macro": value, "best_history": [] if best is None else [best[0]]},
+                _sections(model, opt, completed, epoch, cursor),
             )
             publish(root, f"u{completed}", "LAST", payload)
             macros[completed] = value
@@ -60,7 +66,25 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     }
 
 
-def _sections(model, opt, completed: int) -> dict[str, bytes]:
+def resume(payload: bytes, model, opt) -> dict:
+    import io
+    import json
+
+    import torch
+
+    decoded = unpack(payload)
+    model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu"))
+    opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu"))
+    header = decoded["header"]
+    return {
+        "completed": header["completed"],
+        "epoch": header["epoch"],
+        "cursor": header["cursor"],
+        "best": None if not header["best_history"] else (header["best_history"][-1], header["macro"]),
+    }
+
+
+def _sections(model, opt, completed: int, epoch: int, cursor: int) -> dict[str, bytes]:
     import io
     import json
     import random
@@ -78,8 +102,8 @@ def _sections(model, opt, completed: int) -> dict[str, bytes]:
         "python_rng": json.dumps(random.getstate()).encode("utf-8"),
         "numpy_rng": json.dumps(numpy.random.get_state()[1].tolist()).encode("utf-8"),
         "torch_rng": bytes(torch.get_rng_state().tolist()),
-        "sampler": json.dumps({"completed": completed}).encode("utf-8"),
-        "exposure": json.dumps({"completed": completed}).encode("utf-8"),
+        "sampler": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
+        "exposure": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
     }
 
 
