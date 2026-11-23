@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 WIDTH = 1280
 
 
@@ -17,11 +19,11 @@ def schedule(ids_frames: list[int], current_label: int, target_label: int) -> li
 def _image(id_movi: str, ids_frames: list[int]):
     import torch
 
-    video = sum(ord(char) for char in id_movi)
+    video = int(hashlib.sha256(id_movi.encode("utf-8")).hexdigest()[:8], 16)
     rows = []
     for frame in ids_frames:
-        rows.append(torch.arange(WIDTH, dtype=torch.float32) + float(video * 17 + frame))
-    return torch.stack(rows) / 997.0
+        rows.append(((torch.arange(WIDTH, dtype=torch.float32) * 17) + float(video % 997) + float(frame * 13)) / 996.0)
+    return torch.stack(rows)
 
 
 def synthetic_item(id_movi: str, ids_frames: list[int], history: list[int], current: int, target: int, horizon: str, image=None):
@@ -75,7 +77,9 @@ def assert_no_target_leak(item: dict) -> None:
     mutated[item["ids_frames"].index(item["target"])] += 1.0
     clean = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], image)
     dirty = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], mutated)
-    if not bool(torch.equal(clean["model_kwargs"]["current_latent"], dirty["model_kwargs"]["current_latent"])):
-        raise ValueError("target-frame mutation changed a model input")
+    for key, value in clean["model_kwargs"].items():
+        other = dirty["model_kwargs"][key]
+        if hasattr(value, "equal") and not bool(torch.equal(value, other)):
+            raise ValueError(f"target-frame mutation changed model input {key}")
     if bool(torch.equal(clean["supervision"]["target_delta_local"], dirty["supervision"]["target_delta_local"])):
         raise ValueError("target-frame mutation did not change supervision")

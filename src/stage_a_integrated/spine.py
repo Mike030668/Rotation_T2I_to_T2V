@@ -47,14 +47,16 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
             model.train()
-            payload = pack(
-                {"completed": completed, "epoch": epoch, "cursor": cursor, "macro": value, "best_history": [] if best is None else [best[0]]},
-                _sections(model, opt, completed, epoch, cursor),
-            )
-            publish(root, f"u{completed}", "LAST", payload)
             macros[completed] = value
             if best is None or value < best[1]:
                 best = (completed, value)
+            history = [] if best is None else [{"step": best[0], "macro": best[1]}]
+            payload = pack(
+                {"completed": completed, "epoch": epoch, "cursor": cursor, "macro": value, "best_step": None if best is None else best[0], "best_macro": None if best is None else best[1], "best_history": history, "events": sorted(macros)},
+                _sections(model, opt, completed, epoch, cursor),
+            )
+            publish(root, f"u{completed}", "LAST", payload)
+            if best is not None and best[0] == completed:
                 publish(root, f"u{completed}", "BEST", payload)
     return {
         "completed_updates": completed,
@@ -66,6 +68,13 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     }
 
 
+def _numpy_state() -> list:
+    import numpy
+
+    algo, keys, pos, has_gauss, cached = numpy.random.get_state()
+    return [algo, keys.tolist(), pos, has_gauss, cached]
+
+
 def resume(payload: bytes, model, opt) -> dict:
     import io
     import json
@@ -73,14 +82,25 @@ def resume(payload: bytes, model, opt) -> dict:
     import torch
 
     decoded = unpack(payload)
-    model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu"))
-    opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu"))
+    model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu", weights_only=True))
+    opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu", weights_only=True))
+    import json
+    import random
+
+    import numpy
+
+    version, state, gauss = json.loads(decoded["python_rng"].decode("utf-8"))
+    random.setstate((version, tuple(state), gauss))
+    algo, keys, pos, has_gauss, cached = json.loads(decoded["numpy_rng"].decode("utf-8"))
+    numpy.random.set_state((algo, numpy.array(keys, dtype="uint32"), pos, has_gauss, cached))
+    torch.set_rng_state(torch.tensor(list(decoded["torch_rng"]), dtype=torch.uint8))
     header = decoded["header"]
     return {
         "completed": header["completed"],
         "epoch": header["epoch"],
         "cursor": header["cursor"],
-        "best": None if not header["best_history"] else (header["best_history"][-1], header["macro"]),
+        "best": None if header["best_step"] is None else (header["best_step"], header["best_macro"]),
+        "events": header["events"],
     }
 
 
@@ -100,7 +120,7 @@ def _sections(model, opt, completed: int, epoch: int, cursor: int) -> dict[str, 
         "model": model_buf.getvalue(),
         "adamw": opt_buf.getvalue(),
         "python_rng": json.dumps(random.getstate()).encode("utf-8"),
-        "numpy_rng": json.dumps(numpy.random.get_state()[1].tolist()).encode("utf-8"),
+        "numpy_rng": json.dumps(_numpy_state()).encode("utf-8"),
         "torch_rng": bytes(torch.get_rng_state().tolist()),
         "sampler": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
         "exposure": json.dumps({"completed": completed, "epoch": epoch, "cursor": cursor}).encode("utf-8"),
