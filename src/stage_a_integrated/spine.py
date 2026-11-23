@@ -109,11 +109,14 @@ def _require_exposure_fields(batch: list[dict]) -> None:
 
 
 def _admit_exposure(records: list, header: dict) -> None:
+    required = ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "horizon", "epoch", "cursor", "seed", "provider")
     if len(records) != header["completed"]:
         raise ValueError("exposure length does not match completed")
     for index, record in enumerate(records, start=1):
-        if record.get("schema") != "exposure-v1" or record.get("completed") != index:
+        if record.get("schema") != "exposure-v1" or record.get("completed") != index or record.get("provider") != "SYNTHETIC_APPARATUS":
             raise ValueError("exposure schema or step mismatch")
+        if any(key not in record or record[key] in (None, []) for key in required):
+            raise ValueError("exposure record is missing required fields")
 
 
 def _admit(decoded: dict) -> dict:
