@@ -22,8 +22,17 @@ def next_batch(seed: int, epoch: int, cursor: int, batch: int) -> tuple[list[dic
         current_ord, target_ord = ordinals[-2], ordinals[-1]
         current = labels[current_ord]
         target = labels[target_ord]
-        selected = [labels[index] for index in history[current_ord]]
-        items.append(synthetic_item(video, labels, selected, current, target, "near"))
+        selected_ordinals = list(history[current_ord])
+        selected = [labels[index] for index in selected_ordinals]
+        item = synthetic_item(video, labels, selected, current, target, "near")
+        item["selected_ordinals"] = selected_ordinals
+        item["selected_labels"] = selected
+        item["current_ordinal"] = current_ord
+        item["target_ordinal"] = target_ord
+        item["epoch"] = epoch
+        item["seed"] = seed
+        item["provider"] = "SYNTHETIC_APPARATUS"
+        items.append(item)
     return items, cursor + batch, chosen
 
 

@@ -49,7 +49,17 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
-        exposure.append({"completed": completed, "videos": chosen, "histories": [item["history"] for item in batch]})
+        exposure.append({
+            "completed": completed,
+            "videos": chosen,
+            "selected_ordinals": [item.get("selected_ordinals") for item in batch],
+            "selected_labels": [item.get("selected_labels") for item in batch],
+            "current": [item["current"] for item in batch],
+            "target": [item["target"] for item in batch],
+            "epoch": epoch,
+            "seed": int(config["seed"]),
+            "provider": "SYNTHETIC_APPARATUS",
+        })
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
             model.train()
