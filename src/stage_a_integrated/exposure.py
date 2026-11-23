@@ -26,8 +26,11 @@ def require_item(item: dict) -> None:
         raise ValueError("batch item is not exposure-v1")
     if not _labels_match(item["selected_ordinals"], item["selected_labels"], item["ids_frames"]):
         raise ValueError("selected ordinal does not match the original frame label")
-    if item["selected_ordinals"] != sorted(item["selected_ordinals"]) or item["target_ordinal"] <= item["current_ordinal"]:
-        raise ValueError("history is unordered or target is not after current")
+    ordinals = item["selected_ordinals"]
+    if any(type(value) is not int or isinstance(value, bool) or value < 0 for value in ordinals):
+        raise ValueError("ordinal is not a nonnegative int")
+    if ordinals != sorted(set(ordinals)) or ordinals[-1] != item["current_ordinal"] or item["target_ordinal"] <= item["current_ordinal"]:
+        raise ValueError("history is not a strict prefix ending at current")
     if item["current_ordinal"] not in item["selected_ordinals"] or item["target_ordinal"] in item["selected_ordinals"]:
         raise ValueError("observed prefix must contain current and exclude target")
     if item["ids_frames"][item["current_ordinal"]] != item["current"] or item["ids_frames"][item["target_ordinal"]] != item["target"]:
@@ -59,8 +62,10 @@ def require_records(records: list, completed: int) -> None:
         for ordinals, labels, current_ord, target_ord, current, target, frame_labels in rows:
             if frame_labels != PINNED_SYNTHETIC_LABELS:
                 raise ValueError("ids_frames does not match the pinned synthetic source")
-            if ordinals != sorted(ordinals) or target_ord <= current_ord:
-                raise ValueError("history is unordered or target is not after current")
+            if any(type(value) is not int or isinstance(value, bool) or value < 0 for value in ordinals):
+                raise ValueError("ordinal is not a nonnegative int")
+            if ordinals != sorted(set(ordinals)) or ordinals[-1] != current_ord or target_ord <= current_ord:
+                raise ValueError("history is not a strict prefix ending at current")
             if current_ord not in ordinals or target_ord in ordinals:
                 raise ValueError("observed prefix must contain current and exclude target")
             if len(ordinals) != len(labels):
