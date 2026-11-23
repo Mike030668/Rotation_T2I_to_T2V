@@ -49,7 +49,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
-        exposure.append({"completed": completed, "videos": chosen})
+        exposure.append({"completed": completed, "videos": chosen, "histories": [item["history"] for item in batch]})
         if completed in config["dev_events"]:
             value = evaluate(model, items, keys)
             model.train()
@@ -85,6 +85,24 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     }
 
 
+def _admit(decoded: dict) -> dict:
+    import math
+
+    header = decoded["header"]
+    events = header["events"]
+    macros = header["macros"]
+    if events != sorted(set(events)) or any(type(event) is not int for event in events):
+        raise ValueError("event journal is not a strictly increasing int sequence")
+    if set(events) != {int(step) for step in macros} or any(not str(step).isdigit() or str(int(step)) != str(step) for step in macros):
+        raise ValueError("macro keys do not match event ids")
+    for step, value in macros.items():
+        if not math.isfinite(float(value)):
+            raise ValueError("nonfinite restored macro")
+    if header["best_step"] is not None and (header["best_step"] not in events or header["best_macro"] != macros[str(header["best_step"])] and header["best_macro"] != macros[header["best_step"]]):
+        raise ValueError("best step is not in the restored journal")
+    return header
+
+
 def _numpy_state() -> list:
     import numpy
 
@@ -99,6 +117,7 @@ def resume(payload: bytes, model, opt) -> dict:
     import torch
 
     decoded = unpack(payload)
+    header = _admit(decoded)
     model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu", weights_only=True))
     opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu", weights_only=True))
     import json
@@ -111,7 +130,6 @@ def resume(payload: bytes, model, opt) -> dict:
     algo, keys, pos, has_gauss, cached = json.loads(decoded["numpy_rng"].decode("utf-8"))
     numpy.random.set_state((algo, numpy.array(keys, dtype="uint32"), pos, has_gauss, cached))
     torch.set_rng_state(torch.tensor(list(decoded["torch_rng"]), dtype=torch.uint8))
-    header = decoded["header"]
     return {
         "completed": header["completed"],
         "epoch": header["epoch"],
