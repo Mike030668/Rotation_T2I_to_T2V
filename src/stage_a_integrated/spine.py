@@ -8,7 +8,7 @@ from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import pack, publish
 from .dev import evaluate, load_keys
 from .model_adapter import load_class
-from .samples import synthetic_item
+from .plan import dev_items, next_batch
 from .trainer import optimizer_step
 
 
@@ -25,19 +25,27 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     keys = load_keys(Path(config["horizons_path"]))
     completed = 0
+    epoch = 0
+    cursor = 0
     best = None
+    macros = {}
     root = Path(release.get("output_root"))
+    items = dev_items(keys)
     while completed < int(config["max_updates"]):
-        item = synthetic_item("1", [0, 2, 9, 10, 40], [0, 2], 9, 10, "near")
-        completed += optimizer_step(model, [item], opt, float(config["clip"]))
+        if cursor + int(config["batch"]) > 400:
+            epoch += 1
+            cursor = 0
+        batch, cursor = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
+        completed += optimizer_step(model, batch, opt, float(config["clip"]))
         if completed in config["dev_events"]:
-            value = evaluate(model, config["dev_items"], keys)
+            value = evaluate(model, items, keys)
             model.train()
             payload = pack(
                 {"completed": completed, "macro": value, "best_history": [] if best is None else [best[0]]},
                 _sections(model, opt, completed),
             )
             publish(root, f"u{completed}", "LAST", payload)
+            macros[completed] = value
             if best is None or value < best[1]:
                 best = (completed, value)
                 publish(root, f"u{completed}", "BEST", payload)
@@ -45,6 +53,8 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         "completed_updates": completed,
         "best_step": None if best is None else best[0],
         "last_step": completed,
+        "macros": macros,
+        "events": sorted(macros),
         "observed": False,
     }
 
