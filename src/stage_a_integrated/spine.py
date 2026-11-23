@@ -48,6 +48,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             epoch += 1
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
+        _require_exposure_fields(batch)
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         exposure.append({
             "schema": "exposure-v1",
@@ -100,6 +101,21 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     }
 
 
+def _require_exposure_fields(batch: list[dict]) -> None:
+    required = ("selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "horizon", "provider")
+    for item in batch:
+        if item.get("provider") != "SYNTHETIC_APPARATUS" or any(key not in item for key in required):
+            raise ValueError("batch item is not exposure-v1")
+
+
+def _admit_exposure(records: list, header: dict) -> None:
+    if len(records) != header["completed"]:
+        raise ValueError("exposure length does not match completed")
+    for index, record in enumerate(records, start=1):
+        if record.get("schema") != "exposure-v1" or record.get("completed") != index:
+            raise ValueError("exposure schema or step mismatch")
+
+
 def _admit(decoded: dict) -> dict:
     import math
 
@@ -140,6 +156,7 @@ def resume(payload: bytes, model, opt) -> dict:
 
     decoded = unpack(payload)
     header = _admit(decoded)
+    _admit_exposure(json.loads(decoded["exposure"].decode("utf-8")), header)
     model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu", weights_only=True))
     opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu", weights_only=True))
     import json
