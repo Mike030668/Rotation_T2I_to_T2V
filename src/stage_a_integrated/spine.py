@@ -7,6 +7,7 @@ from pathlib import Path
 from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import pack, publish, unpack
 from .dev import evaluate, load_keys, load_rows
+from .exposure import require_item, require_records
 from .model_adapter import load_class
 from .plan import dev_items, next_batch
 from .trainer import optimizer_step
@@ -48,7 +49,8 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             epoch += 1
             cursor = 0
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
-        _require_exposure_fields(batch)
+        for item in batch:
+            require_item(item)
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         exposure.append({
             "schema": "exposure-v1",
@@ -159,7 +161,7 @@ def resume(payload: bytes, model, opt) -> dict:
 
     decoded = unpack(payload)
     header = _admit(decoded)
-    _admit_exposure(json.loads(decoded["exposure"].decode("utf-8")), header)
+    require_records(json.loads(decoded["exposure"].decode("utf-8")), header["completed"])
     model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu", weights_only=True))
     opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu", weights_only=True))
     import json

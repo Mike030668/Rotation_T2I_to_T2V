@@ -41,8 +41,7 @@ def case_f(events: list[int]) -> None:
 
 def dispatch(release_path: str, trust_anchor_path: str, expected: dict, config: dict) -> dict:
     result = run_synthetic(release_path, trust_anchor_path, expected, config)
-    if result["events"] != [32, 64, 96, 128]:
-        raise ValueError("F events were not produced by the runner")
+    case_f(result["events"])
     return result
 
 
