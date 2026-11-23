@@ -11,6 +11,7 @@ Status: `SOURCE_ONLY / NOT_RUN`
 | B2 DEV metadata | horizons manifest | `b7ad9bb1979285043c62c0e174b7b6515daa843ad97131444928b9a02e1de412` | REUSE | tensors are not in the manifest | `dev.load_rows` |
 | B3 BEST/LAST | current `checkpoints.py` | worktree file | ADAPT | body hashes exist; trusted header admission is incomplete | `spine` publish/resume |
 | B5 causal split | runner collate lines 64–88 | same runner SHA | ADAPT | historical tensors are not available in this source-only gate | `samples.synthetic_item` |
+| B4 release | `authorization.py` | worktree file | NEW | no historical Owner trust module exists in the reviewed runner | `authorization.load` |
 | B6 A–F | `tests/stage_a/test_a_f.py` | worktree file | NEW WIRING | cases do not yet drive the runner | not executed |
 
 `make_pair_sample` is not the sparse-history protocol. The copied sampler remains the sparse-history protocol.

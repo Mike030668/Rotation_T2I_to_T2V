@@ -50,13 +50,18 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         batch, cursor, chosen = next_batch(int(config["seed"]), epoch, cursor, int(config["batch"]))
         completed += optimizer_step(model, batch, opt, float(config["clip"]))
         exposure.append({
+            "schema": "exposure-v1",
             "completed": completed,
             "videos": chosen,
-            "selected_ordinals": [item.get("selected_ordinals") for item in batch],
-            "selected_labels": [item.get("selected_labels") for item in batch],
+            "selected_ordinals": [item["selected_ordinals"] for item in batch],
+            "selected_labels": [item["selected_labels"] for item in batch],
+            "current_ordinal": [item["current_ordinal"] for item in batch],
+            "target_ordinal": [item["target_ordinal"] for item in batch],
             "current": [item["current"] for item in batch],
             "target": [item["target"] for item in batch],
+            "horizon": [item["horizon"] for item in batch],
             "epoch": epoch,
+            "cursor": cursor,
             "seed": int(config["seed"]),
             "provider": "SYNTHETIC_APPARATUS",
         })
