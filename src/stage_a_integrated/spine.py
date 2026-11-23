@@ -98,8 +98,13 @@ def _admit(decoded: dict) -> dict:
     for step, value in macros.items():
         if not math.isfinite(float(value)):
             raise ValueError("nonfinite restored macro")
-    if header["best_step"] is not None and (header["best_step"] not in events or header["best_macro"] != macros[str(header["best_step"])] and header["best_macro"] != macros[header["best_step"]]):
-        raise ValueError("best step is not in the restored journal")
+    numeric = {int(step): float(value) for step, value in macros.items()}
+    if events and header["best_step"] is None:
+        raise ValueError("best is missing while events exist")
+    if header["best_step"] is not None:
+        earliest = min(events, key=lambda step: (numeric[step], step))
+        if header["best_step"] != earliest or float(header["best_macro"]) != numeric[earliest]:
+            raise ValueError("best is not the earliest finite minimum")
     return header
 
 
