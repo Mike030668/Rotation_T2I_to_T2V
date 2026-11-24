@@ -53,7 +53,7 @@ def require_item(item: dict) -> None:
         raise ValueError("current or target ordinal does not match its label")
 
 
-def receipt(batch: list[dict], completed: int, epoch: int, cursor: int, seed: int) -> dict:
+def receipt(batch: list[dict], completed: int, epoch: int, cursor_before: int, cursor_after: int, seed: int) -> dict:
     for item in batch:
         require_item(item)
     return {
@@ -69,7 +69,8 @@ def receipt(batch: list[dict], completed: int, epoch: int, cursor: int, seed: in
         "ids_frames": [item["ids_frames"] for item in batch],
         "horizon": [item["horizon"] for item in batch],
         "epoch": epoch,
-        "cursor": cursor,
+        "cursor_before": cursor_before,
+        "cursor_after": cursor_after,
         "seed": seed,
         "provider": "SYNTHETIC_APPARATUS",
     }
@@ -107,7 +108,7 @@ def require_records(records: list, completed: int) -> None:
             raise ValueError("exposure videos is not a list")
         if record.get("schema") != "exposure-v1" or record.get("completed") != index or record.get("provider") != "SYNTHETIC_APPARATUS":
             raise ValueError("exposure schema or step mismatch")
-        for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon", "epoch", "cursor", "seed"):
+        for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon", "epoch", "cursor_before", "cursor_after", "seed"):
             if key not in record or record[key] in (None, []):
                 raise ValueError("exposure record is missing required fields")
         rows = zip(
