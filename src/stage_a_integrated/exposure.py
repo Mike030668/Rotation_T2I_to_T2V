@@ -1,4 +1,4 @@
-"""Canonical exposure-v2 and sampler-v2 admission. Used before step and resume."""
+"""Canonical exposure-v2 and sampler-v2 admission with C3 forward-input binding."""
 
 from __future__ import annotations
 
@@ -6,6 +6,11 @@ import hashlib
 import json
 
 from . import SAMPLER_SHA256
+from .forward_binding import (
+    FORWARD_BINDING_VERSION,
+    REPRESENTATION_FIREWALL,
+    expected_synthetic_forward_digest,
+)
 from .plan import (
     PINNED_SYNTHETIC_LABELS,
     REMAINDER_POLICY,
@@ -24,7 +29,7 @@ SCHEMA_VERSION = "exposure-v2"
 LEGACY_REJECTED_SCHEMAS = frozenset({"exposure-v1"})
 SAMPLER_SCHEMA_VERSION = "sampler-v2"
 PROVIDER_ID = "SYNTHETIC_APPARATUS"
-FORWARD_BINDING = "DEFERRED_TO_C3"
+FORWARD_BINDING = FORWARD_BINDING_VERSION
 SYNTHETIC_TRAIN_HORIZON = "near"
 
 MAX_JOURNAL_RECORDS = 100_000
@@ -41,6 +46,8 @@ HEX_CHARS = frozenset("0123456789abcdef")
 ITEM_REQUIRED_KEYS = (
     "id_movi",
     "ids_frames",
+    "anchor_ordinal",
+    "anchor",
     "selected_ordinals",
     "selected_labels",
     "current_ordinal",
@@ -54,9 +61,14 @@ ITEM_REQUIRED_KEYS = (
     "source_id",
     "source_sha256",
     "sampler_sha256",
+    "forward_binding",
+    "representation_firewall",
+    "forward_input_sha256",
 )
 COLUMN_KEYS = (
     "videos",
+    "anchor_ordinal",
+    "anchor",
     "selected_ordinals",
     "selected_labels",
     "current_ordinal",
@@ -65,6 +77,7 @@ COLUMN_KEYS = (
     "target",
     "ids_frames",
     "horizon",
+    "forward_input_sha256",
 )
 EXPOSURE_V2_BODY_KEYS = (
     "schema",
@@ -187,6 +200,8 @@ def _validate_row_semantics(
     *,
     video,
     frame_labels,
+    anchor_ordinal,
+    anchor,
     ordinals,
     labels,
     current_ord,
@@ -194,12 +209,17 @@ def _validate_row_semantics(
     current,
     target,
     horizon,
+    forward_input_sha256,
 ) -> None:
     _require_exact_str(video, "video", min_len=1, max_len=MAX_VIDEO_ID_LEN)
     if type(frame_labels) is not list or any(type(val) is not int for val in frame_labels):
         raise ValueError("ids_frames must be a list of exact ints")
     if frame_labels != PINNED_LABELS_LIST:
         raise ValueError("ids_frames does not match the pinned synthetic source")
+    anchor_ord_val = require_exact_int(anchor_ordinal, "anchor_ordinal", minimum=0, maximum=0)
+    anchor_val = require_exact_int(anchor, "anchor")
+    if frame_labels[anchor_ord_val] != anchor_val:
+        raise ValueError("anchor label does not match ids_frames[0]")
     if type(ordinals) is not list or not ordinals or len(ordinals) > len(frame_labels):
         raise ValueError("observed prefix is empty or oversized")
     if any(type(val) is not int or val < 0 or val >= len(frame_labels) for val in ordinals):
@@ -223,6 +243,18 @@ def _validate_row_semantics(
     if frame_labels[cur_ord_val] != cur_val or frame_labels[tgt_ord_val] != tgt_val:
         raise ValueError("current or target label does not match the pinned source")
 
+    fwd_hex = _require_sha256_hex(forward_input_sha256, "forward_input_sha256")
+    expected_fwd_hex = expected_synthetic_forward_digest(
+        video,
+        frame_labels,
+        labels,
+        cur_val,
+        tgt_val,
+        horizon,
+    )
+    if fwd_hex != expected_fwd_hex:
+        raise ValueError("exposure forward_input_sha256 disagrees with independent causal oracle")
+
 
 def require_item(item: dict) -> None:
     if type(item) is not dict:
@@ -237,11 +269,17 @@ def require_item(item: dict) -> None:
         raise ValueError("batch item source_sha256 mismatch")
     if _require_sha256_hex(item["sampler_sha256"], "sampler_sha256") != verify_sampler_pin():
         raise ValueError("batch item sampler_sha256 mismatch")
+    if _require_exact_str(item["forward_binding"], "forward_binding") != FORWARD_BINDING:
+        raise ValueError("batch item forward_binding mismatch")
+    if _require_exact_str(item["representation_firewall"], "representation_firewall") != REPRESENTATION_FIREWALL:
+        raise ValueError("batch item representation_firewall mismatch")
     require_exact_int(item["epoch"], "epoch", minimum=0, maximum=MAX_EPOCH)
     require_exact_int(item["seed"], "seed", minimum=0, maximum=MAX_SEED)
     _validate_row_semantics(
         video=item["id_movi"],
         frame_labels=item["ids_frames"],
+        anchor_ordinal=item["anchor_ordinal"],
+        anchor=item["anchor"],
         ordinals=item["selected_ordinals"],
         labels=item["selected_labels"],
         current_ord=item["current_ordinal"],
@@ -249,6 +287,7 @@ def require_item(item: dict) -> None:
         current=item["current"],
         target=item["target"],
         horizon=item["horizon"],
+        forward_input_sha256=item["forward_input_sha256"],
     )
     if item["id_movi"] not in set(train_ids()):
         raise ValueError("batch item video is outside pinned synthetic train_ids")
@@ -295,6 +334,8 @@ def receipt(
         "cursor_before": before_val,
         "cursor_after": after_val,
         "videos": [item["id_movi"] for item in batch],
+        "anchor_ordinal": [item["anchor_ordinal"] for item in batch],
+        "anchor": [item["anchor"] for item in batch],
         "selected_ordinals": [item["selected_ordinals"] for item in batch],
         "selected_labels": [item["selected_labels"] for item in batch],
         "current_ordinal": [item["current_ordinal"] for item in batch],
@@ -303,6 +344,7 @@ def receipt(
         "target": [item["target"] for item in batch],
         "ids_frames": [item["ids_frames"] for item in batch],
         "horizon": [item["horizon"] for item in batch],
+        "forward_input_sha256": [item["forward_input_sha256"] for item in batch],
     }
     body_bytes = canonical_json_bytes(body, max_bytes=MAX_RECEIPT_BYTES)
     digest = hashlib.sha256(body_bytes).hexdigest()
@@ -451,6 +493,8 @@ def validate_record_structure(
         _validate_row_semantics(
             video=record["videos"][index],
             frame_labels=record["ids_frames"][index],
+            anchor_ordinal=record["anchor_ordinal"][index],
+            anchor=record["anchor"][index],
             ordinals=record["selected_ordinals"][index],
             labels=record["selected_labels"][index],
             current_ord=record["current_ordinal"][index],
@@ -458,6 +502,7 @@ def validate_record_structure(
             current=record["current"][index],
             target=record["target"][index],
             horizon=record["horizon"][index],
+            forward_input_sha256=record["forward_input_sha256"][index],
         )
 
     body = {key: record[key] for key in EXPOSURE_V2_BODY_KEYS}

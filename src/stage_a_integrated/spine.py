@@ -50,7 +50,7 @@ from .checkpoints import (
     verify_checkpoint_provenance,
     write_failure_receipt,
 )
-from .dev import evaluate, load_keys, load_rows
+from .dev import METRIC_STATUS as DEV_METRIC_STATUS, evaluate, expected_dev_digests, load_keys, load_rows
 from .exposure import (
     FORWARD_BINDING,
     MAX_SEED,
@@ -62,6 +62,7 @@ from .exposure import (
     reconcile_checkpoint_state,
     require_record,
 )
+from .forward_binding import REPRESENTATION_FIREWALL
 from .model_adapter import load_class
 from .plan import (
     REMAINDER_POLICY,
@@ -173,10 +174,12 @@ def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]
         "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "synthetic_remainder_policy": REMAINDER_POLICY,
         "forward_binding": FORWARD_BINDING,
+        "representation_firewall": REPRESENTATION_FIREWALL,
+        "dev_metric_status": DEV_METRIC_STATUS,
     }
     for key, expected_val in pin_checks.items():
         if key in config and config[key] != expected_val:
-            raise ValueError(f"config.{key} does not match pinned C2-AMENDMENT-01 contract")
+            raise ValueError(f"config.{key} does not match pinned Stage A contract")
     return max_updates, batch_size, seed, dev_events, clip
 
 
@@ -219,6 +222,8 @@ def _canonical_effective_config_bytes(
         "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "synthetic_remainder_policy": REMAINDER_POLICY,
         "forward_binding": FORWARD_BINDING,
+        "representation_firewall": REPRESENTATION_FIREWALL,
+        "dev_metric_status": DEV_METRIC_STATUS,
         "release_created": False,
     }
     return canonical_json_bytes(effective, max_bytes=65536)
@@ -445,6 +450,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         )
         rows = load_rows(horizons_path)
         keys = load_keys(horizons_path)
+        dev_expected_digests = expected_dev_digests(rows)
     except Exception as exc:
         if caller_rng_snapshot is not None:
             rb_errors = restore_cpu_rng_snapshot(caller_rng_snapshot)
@@ -533,7 +539,13 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         )
         if record["videos"] != chosen:
             raise ValueError("receipt videos do not match next_batch selection")
-        step_inc = optimizer_step(model, batch, opt, clip)
+        step_inc = optimizer_step(
+            model,
+            batch,
+            opt,
+            clip,
+            expected_forward_digests=record["forward_input_sha256"],
+        )
         if step_inc != 1:
             raise ValueError("optimizer_step did not complete one update")
         completed += step_inc
@@ -545,7 +557,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         if completed in dev_events:
             generation_id = f"u{completed}"
             try:
-                value = evaluate(model, items, keys)
+                value = evaluate(model, items, keys, expected_digests=dev_expected_digests)
             except Exception as exc:
                 _safe_write_failure_receipt(
                     root,

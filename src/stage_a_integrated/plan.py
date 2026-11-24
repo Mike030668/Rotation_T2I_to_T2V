@@ -14,6 +14,7 @@ SYNTHETIC_TRAIN_SIZE = 400
 SYNTHETIC_TRAIN_IDS_SHA256 = "76f17184b06cb65936befc25f2661fd2907f4d464c2f88b2a67782452ae68684"
 REMAINDER_POLICY = "rollover_before_overflow"
 PINNED_SYNTHETIC_LABELS = (0, 2, 9, 10, 40)
+DEV_TEMPORAL_AXIS_SEMANTICS = "SYNTHETIC_ORDINAL_0_TO_N_MINUS_1_NOT_HISTORICAL_IDS_FRAMES"
 
 
 def require_exact_int(value, name: str, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -113,20 +114,36 @@ def next_batch(seed: int, epoch: int, cursor_before: int, batch: int) -> tuple[l
         item["source_id"] = SYNTHETIC_SOURCE_ID
         item["source_sha256"] = SYNTHETIC_TRAIN_IDS_SHA256
         item["sampler_sha256"] = sampler_digest
+        item["temporal_axis_semantics"] = "SYNTHETIC_PINNED_LABELS_0_2_9_10_40"
         items.append(item)
     return items, cursor_before + batch, chosen
 
 
 def dev_items(rows: list[dict]) -> list[dict]:
+    if type(rows) is not list or len(rows) != 50:
+        raise ValueError("dev_items requires exact 50 manifest rows")
     items = []
     for row in rows:
-        labels = list(range(int(row["n"])))
-        history = [int(frame) for frame in row["history"]]
-        current = int(row["current"])
+        if type(row) is not dict:
+            raise ValueError("dev_items row must be a dict")
+        id_movi = row.get("id_movi")
+        if type(id_movi) is not str or not id_movi:
+            raise ValueError("dev_items row.id_movi must be a nonempty str")
+        n_frames = require_exact_int(row.get("n"), "row.n", minimum=2)
+        labels = list(range(n_frames))
+        raw_history = row.get("history")
+        if type(raw_history) is not list or not raw_history:
+            raise ValueError("dev_items row.history must be a nonempty list")
+        history = [require_exact_int(frame, "row.history", minimum=0, maximum=n_frames - 1) for frame in raw_history]
+        current = require_exact_int(row.get("current"), "row.current", minimum=0, maximum=n_frames - 2)
         for horizon in ("near", "mid", "far"):
             if row.get(horizon) is None:
                 continue
-            items.append(synthetic_item(str(row["id_movi"]), labels, history, current, int(row[horizon]), horizon))
+            target = require_exact_int(row[horizon], f"row.{horizon}", minimum=current + 1, maximum=n_frames - 1)
+            item = synthetic_item(id_movi, labels, history, current, target, horizon)
+            item["provider"] = "SYNTHETIC_APPARATUS_DEV"
+            item["temporal_axis_semantics"] = DEV_TEMPORAL_AXIS_SEMANTICS
+            items.append(item)
     if len(items) != 147:
         raise ValueError("synthetic dev provider is not 147 pairs")
     return items

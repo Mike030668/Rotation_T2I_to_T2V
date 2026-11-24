@@ -28,6 +28,8 @@
   "synthetic_train_size": 400,
   "synthetic_train_ids_sha256": "76f17184b06cb65936befc25f2661fd2907f4d464c2f88b2a67782452ae68684",
   "synthetic_remainder_policy": "rollover_before_overflow",
-  "forward_binding": "DEFERRED_TO_C3",
+  "forward_binding": "fwd-input-v1",
+  "representation_firewall": "PROXY_UNVALIDATED_E_TO_Z0",
+  "dev_metric_status": "PROPOSED_NOT_DS_FROZEN",
   "release_created": false
 }
