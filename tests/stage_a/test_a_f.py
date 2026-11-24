@@ -32,6 +32,7 @@ from stage_a_integrated.authorization import (
     observe_clean_git_checkout,
     observe_trusted_utc_now,
     read_nonce_ledger,
+    reserve_release_nonce,
 )
 from stage_a_integrated.checkpoints import (
     CONTROL_PLANE_FIXTURE_LABEL,
@@ -343,11 +344,15 @@ def _synthetic_test_trust_bundle(
     }
 
 
-def _expect_raises(exc_type, fn, label: str) -> None:
+def _expect_raises(exc_type, fn, label: str, *, expected_substr: str | None = None):
     try:
         fn()
-    except exc_type:
-        return
+    except exc_type as exc:
+        if expected_substr is not None and expected_substr not in str(exc):
+            raise AssertionError(
+                f"{label} raised {type(exc).__name__} with unexpected reason {str(exc)!r}; expected substring {expected_substr!r}"
+            ) from exc
+        return exc
     raise AssertionError(f"{label} did not raise {exc_type.__name__}")
 
 
@@ -377,12 +382,17 @@ def _fake_report_with_macro(base_report: dict, target_macro: float) -> dict:
 
 
 def fixture_authorization_positive_and_adversarial(horizons_path: Path) -> dict:
-    _expect_raises(ExecutionNotAuthorized, lambda: cli_main([]), "cli default deny")
-    _expect_raises(ExecutionNotAuthorized, lambda: run_all(), "run_all default deny")
+    _expect_raises(ExecutionNotAuthorized, lambda: cli_main([]), "cli default deny", expected_substr="NOT_RUN")
+    _expect_raises(ExecutionNotAuthorized, lambda: run_all(), "run_all default deny", expected_substr="A-F NOT_RUN")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         bundle = _synthetic_test_trust_bundle(root, horizons_path)
-        _expect_raises(ValueError, lambda: resolve_effective_config(bundle["repo_cfg"]), "unprovisioned repo cfg")
+        _expect_raises(
+            ExecutionNotAuthorized,
+            lambda: resolve_effective_config(bundle["repo_cfg"]),
+            "unprovisioned repo cfg",
+            expected_substr="config.horizons_path is unprovisioned",
+        )
         cfg = bundle["build_config"]()
         rel_ok, exp_ok = bundle["mint_release"](cfg)
 
@@ -391,11 +401,13 @@ def fixture_authorization_positive_and_adversarial(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: load_trust_anchor(bundle["trust_path"], bundle["trust_sha"], allow_synthetic_test_trust=False),
             "reject synthetic trust anchor in default production path",
+            expected_substr="non-authoritative fixture trust anchor rejected in execution path",
         )
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_ok, bundle["trust_path"], exp_ok, allow_synthetic_test_trust=False),
             "reject caller overrides in default production path",
+            expected_substr="caller cannot supply expected.now override in production admission",
         )
         exp_no_overrides = {k: v for k, v in exp_ok.items() if k not in ("now", "code_commit_sha", "code_tree_sha")}
         with patch.object(
@@ -414,6 +426,7 @@ def fixture_authorization_positive_and_adversarial(horizons_path: Path) -> dict:
                 ExecutionNotAuthorized,
                 lambda: load_release(rel_ok, bundle["trust_path"], exp_no_overrides, allow_synthetic_test_trust=False),
                 "reject synthetic trust in default production release admission",
+                expected_substr="non-authoritative fixture trust anchor rejected in execution path",
             )
         # Valid synthetic trust acceptance in explicit fixture path.
         loaded = load_release(rel_ok, bundle["trust_path"], exp_ok, allow_synthetic_test_trust=True)
@@ -426,36 +439,42 @@ def fixture_authorization_positive_and_adversarial(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: load_release(rel_emb, bundle["trust_path"], exp_emb, allow_synthetic_test_trust=True),
             "reject embedded key in release",
+            expected_substr="release contains forbidden embedded trust/key field",
         )
         rel_sig, exp_sig = bundle["mint_release"](cfg, tamper_sig=True)
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_sig, bundle["trust_path"], exp_sig, allow_synthetic_test_trust=True),
             "reject tampered Ed25519 signature",
+            expected_substr="release Ed25519 signature verification failed",
         )
         rel_budget, exp_budget = bundle["mint_release"](cfg, max_updates=64)
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_budget, bundle["trust_path"], exp_budget, allow_synthetic_test_trust=True),
             "reject budget slack (64 != 128)",
+            expected_substr="release max_updates must equal config max_updates exactly",
         )
         exp_bad_pin = {**exp_ok, "trust_anchor_sha256": "0" * 64}
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_ok, bundle["trust_path"], exp_bad_pin, allow_synthetic_test_trust=True),
             "reject wrong trust anchor pin",
+            expected_substr="trust anchor public key digest does not match Owner pin",
         )
         rel_expired, exp_expired = bundle["mint_release"](cfg, not_before=FIXTURE_NOW - 100, expires=FIXTURE_NOW - 1)
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_expired, bundle["trust_path"], exp_expired, allow_synthetic_test_trust=True),
             "reject expired ticket",
+            expected_substr="release is outside its authorized validity window",
         )
         bundle["write_revocations"](revoked_tickets=[loaded.get("ticket_id")])
         _expect_raises(
             ExecutionNotAuthorized,
             lambda: load_release(rel_ok, bundle["trust_path"], {**exp_ok, "revocation_sha256": None}, allow_synthetic_test_trust=True),
             "reject revoked ticket",
+            expected_substr="release ticket or nonce has been revoked",
         )
         bundle["write_revocations"]()
 
@@ -473,6 +492,7 @@ def fixture_authorization_positive_and_adversarial(horizons_path: Path) -> dict:
                 LedgerDurabilityUnknownError,
                 lambda: run_synthetic(str(rel_ldg), str(bundle["trust_path"]), exp_ldg, cfg, allow_synthetic_test_trust=True),
                 "ledger dir fsync failure must fail closed with LedgerDurabilityUnknownError",
+                expected_substr="replaced but parent directory fsync failed",
             )
     return {"status": "FIXTURE_PASS"}
 
@@ -525,6 +545,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: observe_clean_git_checkout(pkg_dir, verify_loaded_modules=False),
             "dirty tracked file rejected",
+            expected_substr="dirty or untracked files in git checkout rejected",
         )
         cfg_file.write_text(orig_cfg_text, encoding="utf-8")
 
@@ -534,6 +555,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: observe_clean_git_checkout(pkg_dir, verify_loaded_modules=False),
             "untracked .py substitution rejected",
+            expected_substr="dirty or untracked files in git checkout rejected",
         )
         untracked_py.unlink()
 
@@ -543,6 +565,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: observe_clean_git_checkout(pkg_dir, verify_loaded_modules=False),
             "untracked .json substitution rejected",
+            expected_substr="dirty or untracked files in git checkout rejected",
         )
         untracked_cfg.unlink()
 
@@ -550,6 +573,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             ExecutionNotAuthorized,
             lambda: observe_clean_git_checkout(pkg_dir, verify_loaded_modules=True),
             "loaded modules originating outside temp checkout rejected",
+            expected_substr="originates outside verified checkout",
         )
 
         # Actual repo checkout & real UTC clock must observe clean identity & module origin.
@@ -574,6 +598,9 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             cfg_in_out = b_inside_out["build_config"](max_updates=4, dev_events=[4])
             rel_in_out, exp_in_out = b_inside_out["mint_release"](
                 cfg_in_out,
+                issued_at=real_now - 120,
+                not_before=real_now - 60,
+                expires=real_now + 3600,
                 code_commit_sha=real_obs["code_commit_sha"],
                 code_tree_sha=real_obs["code_tree_sha"],
                 expected_now=None,
@@ -583,6 +610,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                 ExecutionNotAuthorized,
                 lambda: run_synthetic(str(rel_in_out), str(b_inside_out["trust_path"]), exp_in_out, cfg_in_out, allow_synthetic_test_trust=False),
                 "trust artifacts inside output_root rejected pre-model",
+                expected_substr=f"trust_anchor_path must reside outside candidate-writable boundary: {out_shared.resolve()}",
             )
 
             mock_repo_root = root / "mock_candidate_repo"
@@ -597,6 +625,9 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
             cfg_in_repo = b_inside_repo["build_config"](max_updates=4, dev_events=[4])
             rel_in_repo, exp_in_repo = b_inside_repo["mint_release"](
                 cfg_in_repo,
+                issued_at=real_now - 120,
+                not_before=real_now - 60,
+                expires=real_now + 3600,
                 code_commit_sha=real_obs["code_commit_sha"],
                 code_tree_sha=real_obs["code_tree_sha"],
                 expected_now=None,
@@ -624,6 +655,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                         allow_synthetic_test_trust=False,
                     ),
                     "trust artifacts inside candidate checkout rejected pre-model",
+                    expected_substr=f"trust_anchor_path must reside outside candidate-writable boundary: {mock_repo_root.resolve()}",
                 )
 
             # Observed checkout & real UTC clock enforcement via omitted overrides under fixture trust path.
@@ -632,6 +664,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
 
             rel_bad_commit, exp_bad_commit = obs_bundle["mint_release"](
                 cfg_obs,
+                issued_at=real_now - 120,
                 not_before=real_now - 60,
                 expires=real_now + 3600,
                 code_commit_sha="a" * 40,
@@ -643,10 +676,12 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                 ExecutionNotAuthorized,
                 lambda: run_synthetic(str(rel_bad_commit), str(obs_bundle["trust_path"]), exp_bad_commit, cfg_obs, allow_synthetic_test_trust=True),
                 "code_commit_sha mismatch vs observed checkout rejected pre-model",
+                expected_substr="release code_commit_sha disagrees with verified checkout/expectation",
             )
 
             rel_bad_tree, exp_bad_tree = obs_bundle["mint_release"](
                 cfg_obs,
+                issued_at=real_now - 120,
                 not_before=real_now - 60,
                 expires=real_now + 3600,
                 code_commit_sha=real_obs["code_commit_sha"],
@@ -658,6 +693,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                 ExecutionNotAuthorized,
                 lambda: run_synthetic(str(rel_bad_tree), str(obs_bundle["trust_path"]), exp_bad_tree, cfg_obs, allow_synthetic_test_trust=True),
                 "code_tree_sha mismatch vs observed checkout rejected pre-model",
+                expected_substr="release code_tree_sha disagrees with verified checkout/expectation",
             )
 
             rel_exp, exp_exp = obs_bundle["mint_release"](
@@ -674,10 +710,12 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                 ExecutionNotAuthorized,
                 lambda: run_synthetic(str(rel_exp), str(obs_bundle["trust_path"]), exp_exp, cfg_obs, allow_synthetic_test_trust=True),
                 "expired release against real UTC clock rejected pre-model",
+                expected_substr="release is outside its authorized validity window",
             )
 
             rel_dirty, exp_dirty = obs_bundle["mint_release"](
                 cfg_obs,
+                issued_at=real_now - 120,
                 not_before=real_now - 60,
                 expires=real_now + 3600,
                 code_commit_sha=real_obs["code_commit_sha"],
@@ -694,6 +732,7 @@ def fixture_trusted_admission_and_checkout(horizons_path: Path) -> dict:
                     ExecutionNotAuthorized,
                     lambda: run_synthetic(str(rel_dirty), str(obs_bundle["trust_path"]), exp_dirty, cfg_obs, allow_synthetic_test_trust=True),
                     "dirty checkout rejected pre-model",
+                    expected_substr="dirty checkout detected before model construction",
                 )
 
             if load_spy.call_count != 0 or opt_spy.call_count != 0:
@@ -814,16 +853,80 @@ def fixture_case_a_best_last_and_tie(horizons_path: Path) -> dict:
         with patch("stage_a_integrated.spine.evaluate_with_diagnostics", side_effect=fake_eval):
             result = run_synthetic(str(rel), str(bundle["trust_path"]), exp, cfg, allow_synthetic_test_trust=True)
 
-        # Replay of same ticket nonce must fail closed.
-        _expect_raises(
-            ExecutionNotAuthorized,
-            lambda: run_synthetic(str(rel), str(bundle["trust_path"]), exp, cfg, allow_synthetic_test_trust=True),
-            "reject single-use nonce replay",
-        )
+        # Split committed-root unresumed re-entry guard from genuine single-use nonce/ticket replay.
+        ledger_bytes_before = bundle["ledger_path"].read_bytes()
+        loaded_consumed = load_release(rel, bundle["trust_path"], exp, allow_synthetic_test_trust=True)
+        consumed_nonce = loaded_consumed.get("nonce")
+        consumed_ticket_id = loaded_consumed.get("ticket_id")
         ledger = read_nonce_ledger(bundle["ledger_path"])
-        entry = ledger["entries"][load_release(rel, bundle["trust_path"], exp, allow_synthetic_test_trust=True).get("nonce")]
-        if entry["state"] != "CONSUMED":
+        entry = ledger["entries"][consumed_nonce]
+        if entry["state"] != "CONSUMED" or entry["ticket_id"] != consumed_ticket_id:
             raise AssertionError("nonce state did not finalize to CONSUMED")
+
+        commit_128 = resolve_commit(bundle["output_root"])
+        cfg_replay = bundle["build_config"](resume_role="LAST")
+        rel_nonce_replay, exp_nonce_replay = bundle["mint_release"](
+            cfg_replay,
+            ticket_id="syn-ticket-nonce-replay",
+            nonce=consumed_nonce,
+            resume_policy=RESUME_POLICY_LAST,
+            resume_from_commit_sha256=commit_128["commit_sha256"],
+        )
+        rel_ticket_replay, exp_ticket_replay = bundle["mint_release"](
+            cfg_replay,
+            ticket_id=consumed_ticket_id,
+            nonce="syn-nonce-ticket-replay",
+            resume_policy=RESUME_POLICY_LAST,
+            resume_from_commit_sha256=commit_128["commit_sha256"],
+        )
+
+        with patch("stage_a_integrated.spine.load_class", wraps=load_class) as load_spy, patch(
+            "stage_a_integrated.spine.optimizer_step", wraps=optimizer_step
+        ) as opt_spy:
+            # 1. Committed-root unresumed re-entry fails on the committed-root guard (ValueError).
+            _expect_raises(
+                ValueError,
+                lambda: run_synthetic(str(rel), str(bundle["trust_path"]), exp, cfg, allow_synthetic_test_trust=True),
+                "reject unresumed re-entry in committed root",
+                expected_substr="cannot start unresumed training in an already-committed root",
+            )
+            # 2. Direct durable ledger reserve rejects the already-consumed signed release (ExecutionNotAuthorized).
+            _expect_raises(
+                ExecutionNotAuthorized,
+                lambda: reserve_release_nonce(bundle["ledger_path"], loaded_consumed, now=FIXTURE_NOW),
+                "reject consumed nonce directly at durable ledger reserve",
+                expected_substr=f"release nonce {consumed_nonce} already recorded in durable ledger",
+            )
+            # 3. End-to-end run_synthetic with valid RESUME_LAST_ONLY identity rejects consumed nonce replay.
+            _expect_raises(
+                ExecutionNotAuthorized,
+                lambda: run_synthetic(
+                    str(rel_nonce_replay),
+                    str(bundle["trust_path"]),
+                    exp_nonce_replay,
+                    cfg_replay,
+                    allow_synthetic_test_trust=True,
+                ),
+                "reject consumed single-use nonce replay through run_synthetic",
+                expected_substr=f"release nonce {consumed_nonce} already recorded in durable ledger",
+            )
+            # 4. End-to-end run_synthetic with valid RESUME_LAST_ONLY identity rejects consumed ticket_id replay.
+            _expect_raises(
+                ExecutionNotAuthorized,
+                lambda: run_synthetic(
+                    str(rel_ticket_replay),
+                    str(bundle["trust_path"]),
+                    exp_ticket_replay,
+                    cfg_replay,
+                    allow_synthetic_test_trust=True,
+                ),
+                "reject consumed ticket_id replay through run_synthetic",
+                expected_substr=f"release ticket_id {consumed_ticket_id} already recorded in durable ledger",
+            )
+            if bundle["ledger_path"].read_bytes() != ledger_bytes_before:
+                raise AssertionError("durable nonce ledger mutated during rejected re-entry/replay")
+            if load_spy.call_count != 0 or opt_spy.call_count != 0:
+                raise AssertionError("rejected re-entry or replay reached load_class or optimizer_step")
 
         best_ptr = resolve_pointer(bundle["output_root"], "BEST")
         last_ptr = resolve_pointer(bundle["output_root"], "LAST")
@@ -844,6 +947,7 @@ def fixture_case_a_best_last_and_tie(horizons_path: Path) -> dict:
                 ValueError,
                 lambda er=ev_rep: verify_dev_report_consistency(er, require_scientific_metric=True),
                 "control-plane injected macro report must fail require_scientific_metric=True",
+                expected_substr="control-plane injected macro fixture cannot satisfy scientific metric gate",
             )
 
         # Earliest-tie sub-run: [0.50, 0.40, 0.40, 0.45] must keep BEST at step 64.
@@ -884,6 +988,7 @@ def fixture_case_b_nonfinite_dev(horizons_path: Path) -> dict:
                 ValueError,
                 lambda: run_synthetic(str(rel), str(bundle["trust_path"]), exp, cfg, allow_synthetic_test_trust=True),
                 "nonfinite dev at step 96 must fail closed",
+                expected_substr="nonfinite DEV metric at step 96",
             )
         best_ptr = resolve_pointer(bundle["output_root"], "BEST")
         last_ptr = resolve_pointer(bundle["output_root"], "LAST")
@@ -1036,6 +1141,7 @@ def fixture_case_e_last_resume_parity(horizons_path: Path) -> dict:
                 RuntimeError,
                 lambda: run_synthetic(str(rel_p1), str(bundle_res["trust_path"]), exp_p1, cfg_p1, allow_synthetic_test_trust=True),
                 "simulated interruption at step 33",
+                expected_substr="simulated interruption after u32 commit",
             )
 
         commit_p1 = resolve_commit(bundle_res["output_root"])
@@ -1077,6 +1183,7 @@ def fixture_case_e_last_resume_parity(horizons_path: Path) -> dict:
             ValueError,
             lambda: run_synthetic(str(rel_p2), str(bundle_res["trust_path"]), exp_p2, cfg_best, allow_synthetic_test_trust=True),
             "BEST continuation must fail",
+            expected_substr="BEST is a read-only selection/evaluation artifact; canonical continuation requires resume_role='LAST'",
         )
     return {
         "status": "FIXTURE_PASS",
@@ -1089,7 +1196,12 @@ def fixture_case_e_last_resume_parity(horizons_path: Path) -> dict:
 
 def fixture_case_f_exact_milestones(horizons_path: Path) -> dict:
     case_f([32, 64, 96, 128])
-    _expect_raises(ValueError, lambda: case_f([32, 64, 95, 128]), "misaligned milestone rejected")
+    _expect_raises(
+        ValueError,
+        lambda: case_f([32, 64, 95, 128]),
+        "misaligned milestone rejected",
+        expected_substr="F events are not completed-update boundaries",
+    )
     return {"status": "FIXTURE_PASS"}
 
 
@@ -1106,7 +1218,7 @@ def fixture_c2_durability_and_rollback_faults(horizons_path: Path) -> dict:
         real_fsync_dir = ckpt_mod._fsync_dir
 
         def fail_on_root_fsync(path: Path) -> None:
-            if path == bundle["output_root"] and (path / "CURRENT_COMMIT").exists():
+            if path.resolve() == bundle["output_root"].resolve() and (path / "CURRENT_COMMIT").exists():
                 raise OSError("simulated dir fsync failure")
             real_fsync_dir(path)
 
@@ -1250,6 +1362,7 @@ def fixture_c3_forward_leakage_and_dev_mutation(horizons_path: Path) -> dict:
         )
         if rep_zero["raw_cosine"]["mean"] is not None or rep_zero["signal_status"] != "NO_POSITIVE_DELTA_SIGNAL":
             raise AssertionError("zero-delta output must report raw_cosine=None and NO_POSITIVE_DELTA_SIGNAL")
+        verify_dev_report_consistency(rep_zero, require_scientific_metric=True)
     return {"status": "FIXTURE_PASS"}
 
 
