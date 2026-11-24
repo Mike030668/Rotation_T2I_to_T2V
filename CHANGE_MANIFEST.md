@@ -1,23 +1,26 @@
-# Stage A Package C2 Change Manifest (`CHANGE_MANIFEST.md`)
+# Stage A Package C2-AMENDMENT-01 Change Manifest (`CHANGE_MANIFEST.md`)
 
 **Branch:** `local/stage-a-git-first`  
-**C1 Baseline Commits:** Code `7ed83698014a01007baa480f173a482b69a5d9c7` -> Docs `7bb1c73f0c4bd252aa9dd42d5604e69ed7fe3bb6`  
-**C2 Code Commit Chain:** Initial `19e034d2a5ef07443f9a9626c127b97ef48d23e0` (tree `6b5c4af08c8987107d5bd900b65dd15e3561e079`, parent `7bb1c73f0c4bd252aa9dd42d5604e69ed7fe3bb6`) -> Final `6622078391736777edc62ea4a61d33c430bd3dc1` (tree `07b850f720fb952fecc92dbfcdb7536aa3821ff8`)  
+**Prior History Chain:**
+- C1 Baseline: Code `7ed83698014a01007baa480f173a482b69a5d9c7` -> Docs `7bb1c73f0c4bd252aa9dd42d5604e69ed7fe3bb6` (`STC-D066-C1-7BB1C73F-SOURCE-ACCEPTED-WITH-BOUNDARIES-C2-NEXT-20261124-V1`)
+- C2 Initial Submission (Partially Accepted per `STC_STAGE_A_C2_DS_REVIEW_20261124.md`): Initial code `19e034d2a5ef07443f9a9626c127b97ef48d23e0` -> Hardened code `6622078391736777edc62ea4a61d33c430bd3dc1` -> Candidate docs `b6cd585f4f91f77ef227d51fe4d06503ba23500d`
+- **`C2-AMENDMENT-01` Code Commit (Commit 1):** `e04d81b53ddf69adb955f49508d8046c1aa15c02` (Tree `254ad3086faabaf09fa2d1a7d9e935b4de11be3b`, Parent `b6cd585f4f91f77ef227d51fe4d06503ba23500d`)
+
 **Execution Status:** `SOURCE_ONLY / NO_IMPORT / NO_COMPILE / NO_TEST / STOP_FOR_DS`
 
 ---
 
-## 1. Changed Code & Config Files (Final C2 Code State `6622078391736777edc62ea4a61d33c430bd3dc1`)
+## 1. Changed Code & Config Files (`e04d81b53ddf69adb955f49508d8046c1aa15c02`)
 
-| Path | Action | Git Blob (`6622078391736777edc62ea4a61d33c430bd3dc1`) | SHA256 | Contract IDs |
+| Path | Action | Git Blob (`e04d81b53ddf69adb955f49508d8046c1aa15c02`) | SHA256 | Contract / Amendment IDs |
 |---|---|---|---|---|
-| `src/stage_a_integrated/checkpoints.py` | Modified (C2) | `31b35dc64a5e1317b819cb1f9b7b5a3fb6101e28` | `a8df5595ed4f2d66c35c674c02530238ad3b9947fc8c89d5846c2674fa1a7f31` | `C2-01..C2-04` |
-| `src/stage_a_integrated/spine.py` | Modified (C2) | `0b5be8c111820c5ff4136b83dff39aecc839d7cc` | `b99b3330224d6c8ab0bf6bbab3fa996d27cbbb324a8f6321777711cfd5d31505` | `C1-05`, `C2-01..C2-04` |
-| `configs/stage_a_synthetic.json` | Modified (C2) | `e1eb44ceba3a2f28f88c0f204596d07b5494ba59` | `f9eb20b5fe909d499caf027941be37684e3543eaa470197aee4b6e85c1122f9c` | `C2-01..C2-04` |
+| `src/stage_a_integrated/checkpoints.py` | Modified (`C2-AMENDMENT-01`) | `77c92fef0b87f7099e27398413ff281925a09121` | `413cac3452e721a9b74dd51e1d914b9c1ea1ebe62a284ac9864322437d7f273a` | `C2-01` (`BOUNDED`), `C2-02..04`, `C2-A01..C2-A05` |
+| `src/stage_a_integrated/spine.py` | Modified (`C2-AMENDMENT-01`) | `b7e24e0d58e8602a97a5af9cef1743e1bec9701d` | `8c67e02f24c0c8b87fdc93760d5f1109a2a2673ad1fdbae398933e0c5779a626` | `C1-05`, `C2-02..04`, `C2-A01..C2-A05` |
+| `configs/stage_a_synthetic.json` | Modified (`C2-AMENDMENT-01`) | `6ff9605af0e686e2c49c0df8daf4f7be05e8c20a` | `c4ea5502c2dadb22e84b05b8952edb8ee24ac9d2f9a9a69476a83e175214cc24` | `C2-03`, `C2-A01`, `C2-A03`, `C2-A04`, `C2-A05` |
 
 ---
 
-## 2. Unchanged Frozen, C1 Accepted & Downstream C3/C4 Files (`6622078391736777edc62ea4a61d33c430bd3dc1`)
+## 2. Unchanged Frozen, C1 Accepted & Downstream C3/C4 Files (`e04d81b53ddf69adb955f49508d8046c1aa15c02`)
 
 | Path | Role | Git Blob | SHA256 |
 |---|---|---|---|
@@ -29,7 +32,7 @@
 | `src/stage_a_integrated/exposure.py` | C1 accepted `exposure-v2`/`sampler-v2` engine (untouched) | `ba605f090755af3e0eba218118688a91b749c871` | `63170437129c593c7a347ef46e7ea77764f82304f1d1d5b35a0a5127ebd9bde8` |
 | `src/stage_a_integrated/authorization.py` | C4 trust loader (untouched) | `b734fb7da1eea634e8f7041398906cb61d7e5347` | `78cbc505804da594a77e44feb37c4e467c661e4dc21ded448ef33940f497dbba` |
 | `src/stage_a_integrated/cli.py` | Default-denied CLI (untouched) | `c737bf672141b51379edff8945a80b52b9f9a5e6` | `b6a00a067d706dc8545423cf84a63625b1e61118c718dbda8156d58ed9678f32` |
-| `src/stage_a_integrated/dev.py` | C3 DEV evaluator (untouched; call site hardened in `spine.py`) | `2a3635e80305fef9a310b5cebaf4e4586ed1b81e` | `d6ac3138dffe070bfc23a3d9fbd7b55dc71f2716bd3f5dadc1c22399c555f8c1` |
+| `src/stage_a_integrated/dev.py` | C3 DEV evaluator (untouched; call site guarded in `spine.py`) | `2a3635e80305fef9a310b5cebaf4e4586ed1b81e` | `d6ac3138dffe070bfc23a3d9fbd7b55dc71f2716bd3f5dadc1c22399c555f8c1` |
 | `src/stage_a_integrated/model_adapter.py` | Pinned model loader (untouched) | `a9a898d009b51ca50c58abb91d99c15d0e93d0be` | `1e0965f9e4b23e97554604003a156e797cc997b40770bbb13991d1b0637a931a` |
 | `src/stage_a_integrated/objective.py` | Pinned loss loader (untouched) | `a37ce4b38c3ce74ac0dc2e8b1cbe2ae5a3b6e598` | `061e39e460e156f9353a73d778de245f5b382a94e5676a1c77809bdef1096ad7` |
 | `src/stage_a_integrated/samples.py` | C3 synthetic item builder (untouched) | `5b141dc37aed5e203b7140e68d9ef334178e6470` | `b725450015d0c5db51b0cbaf5b0bb63608f92b4fa0746997ca8af3058bcb98c4` |
@@ -38,22 +41,18 @@
 
 ---
 
-## 3. C2 Schema Additions, Bounds, and Failure-Receipt Catalog
+## 3. Summary of `C2-AMENDMENT-01` Schema & Behavioral Additions
 
-- **`stca-v2` Checkpoint Envelope (`checkpoints.py:25-61,261-370`):**
-  - Header adds `"checkpoint_schema": "stca-v2"`, `"body_bytes"`, `"body_sha256"`, and `"provenance"` (`prov-v1`); section entries enforce contiguous offsets (`offset == cursor`), section order `("model", "adamw", "python_rng", "numpy_rng", "torch_rng", "sampler", "exposure")`, min/max bounds (`MAX_HEADER_BYTES = 1 MiB`, `MAX_MODEL_SECTION_BYTES = 128 MiB`, `MAX_ADAMW_SECTION_BYTES = 128 MiB`, `MAX_RNG_SECTION_BYTES = 64 KiB`, `MAX_CHECKPOINT_BYTES = 256 MiB`, `MAX_SAMPLER_BYTES = 4 KiB`, `MAX_JOURNAL_BYTES = 16 MiB`), strict duplicate-key & nonfinite refusal, and exact body/trailing-byte checks.
-  - Legacy v1 checkpoints missing `"checkpoint_schema": "stca-v2"` are explicitly rejected.
-- **`prov-v1` Provenance (`checkpoints.py:136-258`, `spine.py:107-140`, `configs/stage_a_synthetic.json:15-18`):**
-  - Binds `candidate_sha256`, `loss_sha256`, `horizons_sha256`, `horizons_file_sha256`, `sampler_sha256`, `source_id`, `source_sha256`, `exposure_schema`, `sampler_schema`, `checkpoint_schema`, `manifest_schema`, `pointer_schema`, `failure_receipt_schema`, `remainder_policy`, `forward_binding`, `effective_config_sha256`, `generation_id`, `"owner_trust_root_status": "PENDING_OWNER_C4"`, `"release_created": false`.
-- **`ckpt-manifest-v1` & `ptr-v1` Durable Pointers (`checkpoints.py:570-694,766-894`):**
-  - Immutable `generations/u<N>-{BEST,LAST}/` holding `checkpoint.bin` + `manifest.json`; crash-recovery-safe `stage/u<N>-<ROLE>.tmp-NNNN`; same-FS check; file/stage/generations/root `fsync`; pre-rename and post-rename readback + `unpack`; atomic `CURRENT_BEST` and `CURRENT_LAST` recording `previous_generation_id` and `previous_checkpoint_sha256`.
-- **`fail-receipt-v1` Failure Receipts (`checkpoints.py:704-763`, `spine.py:244-252,330-349,401-409,527-535,561-569`):**
-  - Emits bounded canonical receipts in `failures/` for stages `"resume_preflight"`, `"resume_stage"`, `"resume_apply"`, `"dev_eval_failure"`, `"dev_nonfinite"`, and `"checkpoint_publish"` without ever altering `CURRENT_BEST`, `CURRENT_LAST`, or `generations/`.
+- **`commit-v1` (`CURRENT_COMMIT`):** Single authoritative cross-role durable commit uniting `last`, `best`, `best_history`, `commit_seq`, `effective_config_sha256`, `owner_trust_root_status="PENDING_OWNER_C4"`, and `release_created=False`. Replaces split `publish(...)` completely (`publish` removed). Derived `CURRENT_BEST`/`CURRENT_LAST` mirrors add `commit_seq` + `commit_sha256` and are ignored on read (`resolve_pointer` resolves exclusively via `resolve_commit`).
+- **Idempotency & Locking:** `.writer.lock` via `fcntl.flock(LOCK_EX | LOCK_NB)`; `_materialize_generation` verifies exact byte/manifest/provenance match on reuse and refuses conflicts without overwrite; `recover_commit_state` re-syncs derived mirrors when `CURRENT_COMMIT` exists and never promotes uncommitted generations by guessing.
+- **Semantic AdamW (`stage_adamw_state`):** Strict `{step, exp_avg, exp_avg_sq}` keys (no scalar fallback), CPU dtype/shape/finiteness, `exp_avg_sq >= 0`, integral `step == completed`, explicit `completed == 0 -> {}`, exact live parameter mapping & frozen hyperparameters (`lr=1e-4, wd=1e-4, betas=(0.9,0.999), eps=1e-8, amsgrad=False`), source-justified `expected_updated_param_ids`, and cloned live fixed `param_groups`.
+- **End-to-End CPU RNG Boundary & Fatal Rollback:** `capture_cpu_rng_snapshot` before `model_cls()` on resume; full `admitted_result` metadata admission before apply; `FatalRollbackError` + `"fatal_rollback"` failure receipt (with `original_error` and `rollback_errors`, `must_terminate_process=True`) on any rollback failure; `"post_commit_failure"` (`commit_durable=True`) for `PostCommitError`; `rng_scope="cpu_only"` (no GPU claim).
+- **External Provenance (`prov-v1`):** `horizons_file_sha256 == HORIZONS_SHA256` enforced at provenance build & baseline verify; `expected_provenance` mandatory in `_preflight_and_reconcile` and `commit_event`; `PENDING_OWNER_C4` preserved without key/release creation.
 
 ---
 
-## 4. Residual Blockers (C3–C4 / `PENDING_OWNER`)
+## 4. Residual Blockers & Verification Attestation
 
-1. **C3 (`NOT_IMPLEMENTED`):** Forward-input digest binding (`forward_binding` remains `"DEFERRED_TO_C3"`), `500_1` historical corpus & split ABI crosswalk, `dev.py` internal exception/finiteness hardening, and same-forward leak negative.
+1. **C3 (`NOT_IMPLEMENTED`):** Forward-input digest binding (`forward_binding` remains `"DEFERRED_TO_C3"`), `500_1` historical corpus & split ABI crosswalk, `dev.py` internal hardening, and same-forward leak negative.
 2. **C4 / `PENDING_OWNER`:** Independent Ed25519 Owner trust root (`owner_trust_root_status="PENDING_OWNER_C4"`), clock/nonce/revocation ledger, full CLI config (`clip`, `horizons_path`), and A–F harness wiring in `tests/stage_a/test_a_f.py`.
 3. **Verification Attestation:** Static source inspection only; ZERO Python code executed, imported, compiled, or runtime-tested (`NO_EXECUTION`).
