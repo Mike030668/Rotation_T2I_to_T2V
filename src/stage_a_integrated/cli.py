@@ -15,15 +15,15 @@ MAX_CONFIG_BYTES = 65_536
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stage_a_integrated",
-        description="Fail-closed Stage A synthetic runner (requires external Owner Ed25519 trust + signed release).",
+        description=(
+            "Fail-closed Stage A synthetic runner (requires external Owner Ed25519 trust + signed release; "
+            "checkout identity and UTC clock are observed directly at admission)."
+        ),
         add_help=True,
     )
     parser.add_argument("--config", required=False, help="Absolute path to provisioned stage-a-config-v1 JSON")
     parser.add_argument("--release", required=False, help="Absolute path to signed owner-release-v1 JSON")
     parser.add_argument("--trust-anchor-sha256", required=False, help="Expected external Owner Ed25519 public key SHA-256")
-    parser.add_argument("--code-commit", required=False, help="Expected 40-char git commit SHA bound by Owner release")
-    parser.add_argument("--code-tree", required=False, help="Expected 40-char git tree SHA bound by Owner release")
-    parser.add_argument("--now", required=False, type=int, help="Exact unix timestamp for release validity check")
     parser.add_argument("--resume-last", action="store_true", help="Resume canonically from committed LAST pointer")
     parser.add_argument(
         "--execute-authorized-release",
@@ -44,9 +44,6 @@ def main(argv: list[str] | None = None) -> dict:
             ("--config", args.config),
             ("--release", args.release),
             ("--trust-anchor-sha256", args.trust_anchor_sha256),
-            ("--code-commit", args.code_commit),
-            ("--code-tree", args.code_tree),
-            ("--now", args.now),
         )
         if val is None
     ]
@@ -75,9 +72,6 @@ def main(argv: list[str] | None = None) -> dict:
         "output_root": config.get("output_root"),
         "revocation_path": config.get("revocation_path"),
         "nonce_ledger_path": config.get("nonce_ledger_path"),
-        "code_commit_sha": args.code_commit,
-        "code_tree_sha": args.code_tree,
-        "now": args.now,
     }
     return run_synthetic(
         args.release,

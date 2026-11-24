@@ -7,6 +7,9 @@ import fcntl
 import hashlib
 import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 
 from . import CANDIDATE_SHA256, HORIZONS_SHA256, LOSS_SHA256, SAMPLER_SHA256
 from .exposure import HEX_CHARS, canonical_json_bytes, strict_json_loads
@@ -25,6 +28,10 @@ REVOCATION_DOMAIN_PREFIX = b"STCA-OWNER-REVOCATIONS-V1\x00"
 OWNER_TRUST_STATUS_PENDING = "PENDING_OWNER_C4"
 OWNER_TRUST_STATUS_VERIFIED = "OWNER_ED25519_VERIFIED"
 OWNER_TRUST_STATUS_SYNTHETIC_TEST = "SYNTHETIC_NON_AUTHORITATIVE_TEST_TRUST"
+
+ADMISSION_MODE_PRODUCTION = "PRODUCTION_OBSERVED_GIT_AND_UTC"
+ADMISSION_MODE_SYNTHETIC_FIXTURE = "SYNTHETIC_NON_AUTHORITATIVE_FIXTURE"
+MIN_PLAUSIBLE_UTC_EPOCH = 1_700_000_000
 
 RESUME_POLICY_FRESH = "FRESH_ONLY"
 RESUME_POLICY_LAST = "RESUME_LAST_ONLY"
@@ -126,6 +133,13 @@ class VerifiedRelease:
         trust_anchor_sha256: str,
         trust_status: str,
         revocation_sha256: str,
+        observed_now: int,
+        observed_code_commit_sha: str,
+        observed_code_tree_sha: str,
+        admission_mode: str,
+        checkout_root: str | None = None,
+        git_clean: bool | None = None,
+        module_origin_verified: bool = False,
     ) -> None:
         if token is not _TOKEN:
             raise ExecutionNotAuthorized("caller cannot mint a release")
@@ -134,6 +148,13 @@ class VerifiedRelease:
         object.__setattr__(self, "trust_anchor_sha256", trust_anchor_sha256)
         object.__setattr__(self, "trust_status", trust_status)
         object.__setattr__(self, "revocation_sha256", revocation_sha256)
+        object.__setattr__(self, "observed_now", observed_now)
+        object.__setattr__(self, "observed_code_commit_sha", observed_code_commit_sha)
+        object.__setattr__(self, "observed_code_tree_sha", observed_code_tree_sha)
+        object.__setattr__(self, "admission_mode", admission_mode)
+        object.__setattr__(self, "checkout_root", checkout_root)
+        object.__setattr__(self, "git_clean", git_clean)
+        object.__setattr__(self, "module_origin_verified", module_origin_verified)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise ExecutionNotAuthorized("VerifiedRelease is immutable")
@@ -143,6 +164,112 @@ class VerifiedRelease:
 
     def to_dict(self) -> dict:
         return dict(self._receipt)
+
+
+def observe_trusted_utc_now() -> int:
+    """Read actual UTC epoch clock at admission; reject implausible wall clock."""
+    now = int(time.time())
+    if now < MIN_PLAUSIBLE_UTC_EPOCH:
+        raise ExecutionNotAuthorized(f"system UTC clock {now} is below minimum trusted epoch")
+    return now
+
+
+def _run_git_readonly(repo_dir: Path, args: list[str]) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionNotAuthorized(f"git inspection failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise ExecutionNotAuthorized(f"git {' '.join(args)} failed: {detail[:200]}")
+    return proc.stdout
+
+
+def observe_clean_git_checkout(
+    package_dir: str | Path | None = None,
+    *,
+    verify_loaded_modules: bool = True,
+) -> dict:
+    """Verify clean Git checkout (HEAD, HEAD^{tree}, zero dirty/untracked files) and loaded module origin."""
+    pkg_dir = Path(__file__).resolve().parent if package_dir is None else Path(package_dir).resolve()
+    if not pkg_dir.is_dir():
+        raise ExecutionNotAuthorized("package directory does not exist for checkout verification")
+
+    checkout_root = Path(_run_git_readonly(pkg_dir, ["rev-parse", "--show-toplevel"]).strip()).resolve()
+    if not checkout_root.is_dir():
+        raise ExecutionNotAuthorized("observed git checkout root does not exist")
+    if pkg_dir != checkout_root and checkout_root not in pkg_dir.parents:
+        raise ExecutionNotAuthorized("package directory escapes observed git checkout root")
+
+    code_commit_sha = _require_exact_hex(
+        _run_git_readonly(checkout_root, ["rev-parse", "--verify", "HEAD"]).strip(),
+        "observed.code_commit_sha",
+        length=40,
+    )
+    code_tree_sha = _require_exact_hex(
+        _run_git_readonly(checkout_root, ["rev-parse", "--verify", "HEAD^{tree}"]).strip(),
+        "observed.code_tree_sha",
+        length=40,
+    )
+    status_raw = _run_git_readonly(checkout_root, ["status", "--porcelain=v1", "--untracked-files=all", "-z"])
+    if status_raw != "":
+        first_entry = status_raw.split("\0", 1)[0]
+        raise ExecutionNotAuthorized(f"dirty or untracked files in git checkout rejected: {first_entry[:200]}")
+
+    if verify_loaded_modules:
+        expected_pkg_dir = (checkout_root / "src" / "stage_a_integrated").resolve()
+        if pkg_dir != expected_pkg_dir:
+            raise ExecutionNotAuthorized("package_dir disagrees with checkout src/stage_a_integrated")
+        if "stage_a_integrated.authorization" not in sys.modules:
+            raise ExecutionNotAuthorized("stage_a_integrated.authorization missing from sys.modules")
+        for mod_name, mod in list(sys.modules.items()):
+            if mod is None or not (mod_name == "stage_a_integrated" or mod_name.startswith("stage_a_integrated.")):
+                continue
+            mod_file = getattr(mod, "__file__", None)
+            if type(mod_file) is not str or not mod_file:
+                raise ExecutionNotAuthorized(f"loaded module {mod_name} missing verified __file__")
+            resolved_file = Path(mod_file).resolve()
+            if not resolved_file.is_file() or resolved_file.suffix != ".py":
+                raise ExecutionNotAuthorized(f"loaded module {mod_name} is not a .py source file: {resolved_file}")
+            if resolved_file != expected_pkg_dir and expected_pkg_dir not in resolved_file.parents:
+                raise ExecutionNotAuthorized(f"loaded module {mod_name} originates outside verified checkout")
+            if hasattr(mod, "__path__"):
+                for raw_entry in mod.__path__:
+                    resolved_entry = Path(str(raw_entry)).resolve()
+                    if resolved_entry != expected_pkg_dir and expected_pkg_dir not in resolved_entry.parents:
+                        raise ExecutionNotAuthorized(
+                            f"loaded package {mod_name} __path__ escapes verified checkout"
+                        )
+
+    return {
+        "checkout_root": str(checkout_root),
+        "package_dir": str(pkg_dir),
+        "code_commit_sha": code_commit_sha,
+        "code_tree_sha": code_tree_sha,
+        "git_clean": True,
+        "module_origin_verified": bool(verify_loaded_modules),
+    }
+
+
+def assert_external_trust_boundary(
+    path: str | Path,
+    *,
+    label: str,
+    forbidden_roots: tuple[Path, ...],
+) -> Path:
+    """Enforce that trust/revocation/ledger artifacts reside outside candidate-writable directories."""
+    resolved = Path(canonical_resolved_path(str(path), label))
+    for froot in forbidden_roots:
+        fr = Path(froot).resolve()
+        if resolved == fr or fr in resolved.parents:
+            raise ExecutionNotAuthorized(f"{label} must reside outside candidate-writable boundary: {fr}")
+    return resolved
 
 
 def _require_nonempty_str(value: object, name: str, *, max_len: int = 256) -> str:
@@ -375,12 +502,68 @@ def load(
     revocation_path: str | Path | None = None,
     allow_synthetic_test_trust: bool = False,
 ) -> VerifiedRelease:
-    """Verify external Owner trust root, signed revocations, and signed single-use release."""
+    """Verify external Owner trust root, signed revocations, clean checkout / UTC clock, and single-use release."""
     if type(expected) is not dict:
         raise ExecutionNotAuthorized("expected verification parameters must be a dict")
     rev_path = revocation_path if revocation_path is not None else expected.get("revocation_path")
     if rev_path is None:
         raise ExecutionNotAuthorized("revocation_path is required for Owner release verification")
+
+    exp_root = canonical_resolved_path(expected.get("output_root"), "expected.output_root")
+    exp_root_path = Path(exp_root)
+
+    if not allow_synthetic_test_trust:
+        for override_key in ("now", "code_commit_sha", "code_tree_sha"):
+            if expected.get(override_key) is not None:
+                raise ExecutionNotAuthorized(
+                    f"caller cannot supply expected.{override_key} override in production admission"
+                )
+        observed_checkout = observe_clean_git_checkout(
+            Path(__file__).resolve().parent,
+            verify_loaded_modules=True,
+        )
+        now = observe_trusted_utc_now()
+        expected_commit = observed_checkout["code_commit_sha"]
+        expected_tree = observed_checkout["code_tree_sha"]
+        checkout_root: str | None = observed_checkout["checkout_root"]
+        git_clean: bool | None = True
+        module_origin_verified = True
+        admission_mode = ADMISSION_MODE_PRODUCTION
+        forbidden_roots: tuple[Path, ...] = (exp_root_path, Path(checkout_root))
+    else:
+        now = (
+            _require_auth_int(expected["now"], "expected.now", minimum=1)
+            if expected.get("now") is not None
+            else observe_trusted_utc_now()
+        )
+        if expected.get("code_commit_sha") is not None or expected.get("code_tree_sha") is not None:
+            expected_commit = _require_exact_hex(expected.get("code_commit_sha"), "expected.code_commit_sha", length=40)
+            expected_tree = _require_exact_hex(expected.get("code_tree_sha"), "expected.code_tree_sha", length=40)
+            checkout_root = None
+            git_clean = None
+            module_origin_verified = False
+            forbidden_roots = (exp_root_path,)
+        else:
+            observed_checkout = observe_clean_git_checkout(
+                Path(__file__).resolve().parent,
+                verify_loaded_modules=True,
+            )
+            expected_commit = observed_checkout["code_commit_sha"]
+            expected_tree = observed_checkout["code_tree_sha"]
+            checkout_root = observed_checkout["checkout_root"]
+            git_clean = True
+            module_origin_verified = True
+            forbidden_roots = (exp_root_path, Path(checkout_root))
+        admission_mode = ADMISSION_MODE_SYNTHETIC_FIXTURE
+
+    assert_external_trust_boundary(trust_anchor_path, label="trust_anchor_path", forbidden_roots=forbidden_roots)
+    assert_external_trust_boundary(rev_path, label="revocation_path", forbidden_roots=forbidden_roots)
+    if expected.get("nonce_ledger_path") is not None:
+        assert_external_trust_boundary(
+            expected["nonce_ledger_path"],
+            label="nonce_ledger_path",
+            forbidden_roots=forbidden_roots,
+        )
 
     trust_anchor = load_trust_anchor(
         trust_anchor_path,
@@ -431,7 +614,6 @@ def load(
     expires = _require_auth_int(release["expires"], "release.expires", minimum=1)
     if not (issued_at <= not_before < expires):
         raise ExecutionNotAuthorized("release validity window is malformed")
-    now = _require_auth_int(expected.get("now"), "expected.now", minimum=1)
     if now < not_before or now > expires:
         raise ExecutionNotAuthorized("release is outside its authorized validity window")
 
@@ -446,18 +628,13 @@ def load(
         raise ExecutionNotAuthorized("release max_updates must equal config max_updates exactly")
 
     rel_root = canonical_resolved_path(release["output_root"], "release.output_root")
-    exp_root = canonical_resolved_path(expected.get("output_root"), "expected.output_root")
     if rel_root != exp_root:
         raise ExecutionNotAuthorized("release output_root disagrees with expected resolved output_root")
 
-    if _require_exact_hex(release["code_commit_sha"], "release.code_commit_sha", length=40) != _require_exact_hex(
-        expected.get("code_commit_sha"), "expected.code_commit_sha", length=40
-    ):
-        raise ExecutionNotAuthorized("release code_commit_sha mismatch")
-    if _require_exact_hex(release["code_tree_sha"], "release.code_tree_sha", length=40) != _require_exact_hex(
-        expected.get("code_tree_sha"), "expected.code_tree_sha", length=40
-    ):
-        raise ExecutionNotAuthorized("release code_tree_sha mismatch")
+    if _require_exact_hex(release["code_commit_sha"], "release.code_commit_sha", length=40) != expected_commit:
+        raise ExecutionNotAuthorized("release code_commit_sha disagrees with verified checkout/expectation")
+    if _require_exact_hex(release["code_tree_sha"], "release.code_tree_sha", length=40) != expected_tree:
+        raise ExecutionNotAuthorized("release code_tree_sha disagrees with verified checkout/expectation")
     if _require_exact_hex(
         release["effective_config_sha256"], "release.effective_config_sha256", length=64
     ) != _require_exact_hex(expected.get("effective_config_sha256"), "expected.effective_config_sha256", length=64):
@@ -507,6 +684,13 @@ def load(
         trust_anchor_sha256=trust_anchor["public_key_sha256"],
         trust_status=trust_anchor["trust_status"],
         revocation_sha256=revocations["revocation_sha256"],
+        observed_now=now,
+        observed_code_commit_sha=expected_commit,
+        observed_code_tree_sha=expected_tree,
+        admission_mode=admission_mode,
+        checkout_root=checkout_root,
+        git_clean=git_clean,
+        module_origin_verified=module_origin_verified,
     )
 
 

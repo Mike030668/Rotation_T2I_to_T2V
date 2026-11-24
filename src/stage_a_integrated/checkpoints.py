@@ -26,7 +26,13 @@ from .exposure import (
     canonical_json_bytes,
     strict_json_loads,
 )
-from .plan import REMAINDER_POLICY, SYNTHETIC_SOURCE_ID, SYNTHETIC_TRAIN_IDS_SHA256, require_exact_int
+from .plan import (
+    DEV_TEMPORAL_AXIS_SEMANTICS,
+    REMAINDER_POLICY,
+    SYNTHETIC_SOURCE_ID,
+    SYNTHETIC_TRAIN_IDS_SHA256,
+    require_exact_int,
+)
 
 MAGIC = b"STCA"
 CHECKPOINT_SCHEMA_VERSION = "stca-v2"
@@ -38,6 +44,22 @@ DEV_REPORT_SCHEMA_VERSION = "dev-report-v1"
 DEV_METRIC_ID = "dev_delta_huber_macro"
 DEV_METRIC_VERSION = "stage-a-dev-v1"
 DEV_METRIC_STATUS = "DS_FROZEN_STAGE_A_V1"
+DEV_METRIC_BETA = 0.05
+DEV_METRIC_LOCAL_WEIGHT = 0.5
+DEV_METRIC_ANCHOR_WEIGHT = 0.5
+DEV_METRIC_AGGREGATION = "equal_video_macro_50_over_147_pairs"
+DEV_METRIC_DIRECTION = "minimize"
+DEV_METRIC_TIE_POLICY = "earliest_strict_improvement_eps_0"
+DEV_METRIC_EPSILON = 0.0
+DEV_DIAGNOSTICS_POLICY = "mandatory_no_motion_norms_cosine_magnitude_no_aux_selection"
+DEV_H2_POLICY = "secondary_contrast_deferred_not_run"
+DEV_EXPECTED_VIDEOS = 50
+DEV_EXPECTED_PAIRS = 147
+DEV_HORIZON_NAMES = ("near", "mid", "far")
+DEV_EXPECTED_HORIZON_COUNTS = {"near": 50, "mid": 47, "far": 50}
+DEV_PREDECLARED_ABSENT_MID_VIDEOS = frozenset({"28060", "37577", "17858"})
+CONTROL_PLANE_FIXTURE_LABEL = "CONTROL_PLANE_INJECTED_MACRO_FIXTURE"
+DEV_REPORT_RECOMPUTE_TOL = 1e-12
 FAILURE_RECEIPT_SCHEMA_VERSION = "fail-receipt-v1"
 OWNER_TRUST_ROOT_STATUS = "PENDING_OWNER_C4"
 ALLOWED_ACTIVE_TRUST_STATUSES = frozenset({OWNER_TRUST_STATUS_VERIFIED, OWNER_TRUST_STATUS_SYNTHETIC_TEST})
@@ -358,14 +380,15 @@ def _single_writer_lock(root: Path):
             os.close(fd)
 
 
-def _validate_dev_report_bytes(raw: bytes, *, expected_macro: float) -> tuple[dict, str]:
-    if type(raw) is not bytes or len(raw) < 2 or len(raw) > MAX_DEV_REPORT_BYTES:
-        raise ValueError("dev_report.json must be bounded canonical bytes")
-    report = strict_json_loads(raw, max_bytes=MAX_DEV_REPORT_BYTES)
+def verify_dev_report_consistency(
+    report: object,
+    *,
+    expected_macro: float | None = None,
+    require_scientific_metric: bool = False,
+) -> dict:
+    """Verify frozen `stage-a-dev-v1` schema, recompute aggregates/diagnostics, and check fixture tags."""
     if type(report) is not dict:
-        raise ValueError("dev_report.json must decode to an object")
-    if canonical_json_bytes(report, max_bytes=MAX_DEV_REPORT_BYTES) != raw:
-        raise ValueError("dev_report.json bytes are not canonical")
+        raise ValueError("dev_report must be a dict")
     required = {
         "dev_report_schema",
         "metric_name",
@@ -374,15 +397,30 @@ def _validate_dev_report_bytes(raw: bytes, *, expected_macro: float) -> tuple[di
         "beta",
         "local_weight",
         "anchor_weight",
+        "aggregation",
+        "direction",
+        "tie_policy",
+        "epsilon",
+        "diagnostics_policy",
+        "h2_policy",
+        "temporal_axis_semantics",
         "horizons_sha256",
         "macro",
         "no_motion_macro",
+        "delta_vs_no_motion",
         "beats_no_motion",
         "signal_status",
         "video_count",
         "pair_count",
+        "predeclared_absent_mid_videos",
         "per_video_macro",
+        "per_video_no_motion_macro",
+        "per_video_delta_vs_no_motion",
+        "per_video_counts",
         "per_horizon_macro",
+        "per_horizon_no_motion_macro",
+        "per_horizon_delta_vs_no_motion",
+        "per_horizon_counts",
         "directional_cosine_loss",
         "raw_cosine",
         "magnitude_log_ratio_loss",
@@ -390,28 +428,284 @@ def _validate_dev_report_bytes(raw: bytes, *, expected_macro: float) -> tuple[di
         "dev_forward_digests_sha256",
     }
     if not required.issubset(report.keys()):
-        raise ValueError("dev_report.json missing required frozen metric fields")
+        raise ValueError("dev_report missing required frozen metric fields")
+
+    if "control_plane_fixture" in report:
+        if type(report["control_plane_fixture"]) is not bool:
+            raise ValueError("dev_report.control_plane_fixture must be exact bool")
+        is_cp_fixture = report["control_plane_fixture"]
+    else:
+        is_cp_fixture = False
+    if "scientific_metric_valid" in report:
+        if type(report["scientific_metric_valid"]) is not bool:
+            raise ValueError("dev_report.scientific_metric_valid must be exact bool")
+        sci_valid = report["scientific_metric_valid"]
+    else:
+        sci_valid = not is_cp_fixture
+    if is_cp_fixture:
+        if sci_valid is not False:
+            raise ValueError("control-plane injected macro fixture must set scientific_metric_valid=False")
+        if report.get("control_plane_fixture_label") != CONTROL_PLANE_FIXTURE_LABEL:
+            raise ValueError("control-plane injected macro fixture missing required label")
+    else:
+        if sci_valid is not True:
+            raise ValueError("non-fixture dev_report must set scientific_metric_valid=True")
+    if require_scientific_metric and (is_cp_fixture or not sci_valid):
+        raise ValueError("control-plane injected macro fixture cannot satisfy scientific metric gate")
+
     if report["dev_report_schema"] != DEV_REPORT_SCHEMA_VERSION:
-        raise ValueError("dev_report.json schema mismatch")
+        raise ValueError("dev_report schema mismatch")
     if (
         report["metric_name"] != DEV_METRIC_ID
         or report["metric_version"] != DEV_METRIC_VERSION
         or report["metric_status"] != DEV_METRIC_STATUS
     ):
-        raise ValueError("dev_report.json frozen metric identity mismatch")
+        raise ValueError("dev_report frozen metric identity mismatch")
+    if _require_finite_number(report["beta"], "dev_report.beta") != DEV_METRIC_BETA:
+        raise ValueError("dev_report.beta disagrees with frozen 0.05")
+    if _require_finite_number(report["local_weight"], "dev_report.local_weight") != DEV_METRIC_LOCAL_WEIGHT:
+        raise ValueError("dev_report.local_weight disagrees with frozen 0.5")
+    if _require_finite_number(report["anchor_weight"], "dev_report.anchor_weight") != DEV_METRIC_ANCHOR_WEIGHT:
+        raise ValueError("dev_report.anchor_weight disagrees with frozen 0.5")
+    if report["aggregation"] != DEV_METRIC_AGGREGATION:
+        raise ValueError("dev_report.aggregation mismatch")
+    if report["direction"] != DEV_METRIC_DIRECTION:
+        raise ValueError("dev_report.direction mismatch")
+    if report["tie_policy"] != DEV_METRIC_TIE_POLICY:
+        raise ValueError("dev_report.tie_policy mismatch")
+    if _require_finite_number(report["epsilon"], "dev_report.epsilon") != DEV_METRIC_EPSILON:
+        raise ValueError("dev_report.epsilon mismatch")
+    if report["diagnostics_policy"] != DEV_DIAGNOSTICS_POLICY:
+        raise ValueError("dev_report.diagnostics_policy mismatch")
+    if report["h2_policy"] != DEV_H2_POLICY:
+        raise ValueError("dev_report.h2_policy mismatch")
+    if report["temporal_axis_semantics"] != DEV_TEMPORAL_AXIS_SEMANTICS:
+        raise ValueError("dev_report.temporal_axis_semantics mismatch")
     if report["horizons_sha256"] != HORIZONS_SHA256:
-        raise ValueError("dev_report.json horizons_sha256 mismatch")
-    if report["video_count"] != 50 or report["pair_count"] != 147:
-        raise ValueError("dev_report.json coverage count mismatch")
+        raise ValueError("dev_report.horizons_sha256 mismatch")
+    _require_hex64(report["dev_forward_digests_sha256"], "dev_report.dev_forward_digests_sha256")
+
+    video_count = require_exact_int(report["video_count"], "dev_report.video_count", minimum=DEV_EXPECTED_VIDEOS, maximum=DEV_EXPECTED_VIDEOS)
+    pair_count = require_exact_int(report["pair_count"], "dev_report.pair_count", minimum=DEV_EXPECTED_PAIRS, maximum=DEV_EXPECTED_PAIRS)
+    if report["predeclared_absent_mid_videos"] != sorted(DEV_PREDECLARED_ABSENT_MID_VIDEOS):
+        raise ValueError("dev_report.predeclared_absent_mid_videos mismatch")
+
+    pvm = report["per_video_macro"]
+    pvnm = report["per_video_no_motion_macro"]
+    pvd = report["per_video_delta_vs_no_motion"]
+    pvc = report["per_video_counts"]
+    for name, container in (
+        ("per_video_macro", pvm),
+        ("per_video_no_motion_macro", pvnm),
+        ("per_video_delta_vs_no_motion", pvd),
+        ("per_video_counts", pvc),
+    ):
+        if type(container) is not dict or len(container) != video_count:
+            raise ValueError(f"dev_report.{name} must cover exact {video_count} videos")
+    if not (set(pvm.keys()) == set(pvnm.keys()) == set(pvd.keys()) == set(pvc.keys())):
+        raise ValueError("dev_report per-video maps have mismatched video keys")
+    if not DEV_PREDECLARED_ABSENT_MID_VIDEOS.issubset(pvm.keys()):
+        raise ValueError("dev_report missing predeclared absent-mid videos")
+
+    total_pairs_from_videos = 0
+    per_video_sum = 0.0
+    per_video_nm_sum = 0.0
+    for vid in sorted(pvm.keys()):
+        if type(vid) is not str or not vid:
+            raise ValueError("dev_report per_video key must be nonempty str")
+        expected_vcount = 2 if vid in DEV_PREDECLARED_ABSENT_MID_VIDEOS else 3
+        vcount = require_exact_int(pvc[vid], f"per_video_counts.{vid}", minimum=expected_vcount, maximum=expected_vcount)
+        total_pairs_from_videos += vcount
+        vm = _require_finite_number(pvm[vid], f"per_video_macro.{vid}")
+        vnm = _require_finite_number(pvnm[vid], f"per_video_no_motion_macro.{vid}")
+        vd = _require_finite_number(pvd[vid], f"per_video_delta_vs_no_motion.{vid}")
+        if vm < 0.0 or vnm < 0.0:
+            raise ValueError(f"negative Smooth L1 loss for video {vid}")
+        if abs((vm - vnm) - vd) > DEV_REPORT_RECOMPUTE_TOL:
+            raise ValueError(f"per_video_delta_vs_no_motion inconsistency for {vid}")
+        per_video_sum += vm
+        per_video_nm_sum += vnm
+    if total_pairs_from_videos != pair_count:
+        raise ValueError("sum(per_video_counts) does not equal 147")
+
+    recomputed_macro = per_video_sum / float(video_count)
+    recomputed_nm = per_video_nm_sum / float(video_count)
+    recomputed_delta = recomputed_macro - recomputed_nm
     macro_val = _require_finite_number(report["macro"], "dev_report.macro")
     nm_val = _require_finite_number(report["no_motion_macro"], "dev_report.no_motion_macro")
-    if macro_val != float(expected_macro):
+    delta_val = _require_finite_number(report["delta_vs_no_motion"], "dev_report.delta_vs_no_motion")
+    if abs(macro_val - recomputed_macro) > DEV_REPORT_RECOMPUTE_TOL:
+        raise ValueError("dev_report.macro disagrees with recomputed mean(per_video_macro)")
+    if abs(nm_val - recomputed_nm) > DEV_REPORT_RECOMPUTE_TOL:
+        raise ValueError("dev_report.no_motion_macro disagrees with recomputed mean(per_video_no_motion_macro)")
+    if abs(delta_val - (macro_val - nm_val)) > DEV_REPORT_RECOMPUTE_TOL:
+        raise ValueError("dev_report.delta_vs_no_motion disagrees with macro - no_motion_macro")
+    if expected_macro is not None and macro_val != float(expected_macro):
         raise ValueError("dev_report.macro disagrees with checkpoint header/commit macro")
     if report["beats_no_motion"] is not (macro_val < nm_val):
         raise ValueError("dev_report.beats_no_motion disagrees with macro vs no_motion_macro")
     expected_signal = "STRICTLY_BELOW_NO_MOTION" if (macro_val < nm_val) else "NO_POSITIVE_DELTA_SIGNAL"
     if report["signal_status"] != expected_signal:
         raise ValueError("dev_report.signal_status disagrees with comparator")
+
+    phm = report["per_horizon_macro"]
+    phnm = report["per_horizon_no_motion_macro"]
+    phd = report["per_horizon_delta_vs_no_motion"]
+    phc = report["per_horizon_counts"]
+    horizon_keys = set(DEV_HORIZON_NAMES)
+    for name, container in (
+        ("per_horizon_macro", phm),
+        ("per_horizon_no_motion_macro", phnm),
+        ("per_horizon_delta_vs_no_motion", phd),
+        ("per_horizon_counts", phc),
+    ):
+        if type(container) is not dict or set(container.keys()) != horizon_keys:
+            raise ValueError(f"dev_report.{name} keys must match near/mid/far")
+    for horizon in DEV_HORIZON_NAMES:
+        expected_hc = DEV_EXPECTED_HORIZON_COUNTS[horizon]
+        require_exact_int(phc[horizon], f"per_horizon_counts.{horizon}", minimum=expected_hc, maximum=expected_hc)
+        hm = _require_finite_number(phm[horizon], f"per_horizon_macro.{horizon}")
+        hnm = _require_finite_number(phnm[horizon], f"per_horizon_no_motion_macro.{horizon}")
+        hd = _require_finite_number(phd[horizon], f"per_horizon_delta_vs_no_motion.{horizon}")
+        if hm < 0.0 or hnm < 0.0:
+            raise ValueError(f"negative horizon Smooth L1 for {horizon}")
+        if abs((hm - hnm) - hd) > DEV_REPORT_RECOMPUTE_TOL:
+            raise ValueError(f"per_horizon_delta_vs_no_motion inconsistency for {horizon}")
+
+    dir_block = report["directional_cosine_loss"]
+    dir_keys = {
+        "definition",
+        "local_mean",
+        "anchor_mean",
+        "mean",
+        "valid_target_count_local",
+        "valid_target_count_anchor",
+    }
+    if type(dir_block) is not dict or set(dir_block.keys()) != dir_keys:
+        raise ValueError("dev_report.directional_cosine_loss keys invalid")
+    if type(dir_block["definition"]) is not str or not dir_block["definition"]:
+        raise ValueError("dev_report.directional_cosine_loss.definition invalid")
+    d_loc = _require_finite_number(dir_block["local_mean"], "directional_cosine_loss.local_mean")
+    d_anc = _require_finite_number(dir_block["anchor_mean"], "directional_cosine_loss.anchor_mean")
+    d_mean = _require_finite_number(dir_block["mean"], "directional_cosine_loss.mean")
+    if d_loc < 0.0 or d_anc < 0.0 or abs(0.5 * (d_loc + d_anc) - d_mean) > DEV_REPORT_RECOMPUTE_TOL:
+        raise ValueError("dev_report.directional_cosine_loss mean inconsistent")
+    d_vt_loc = require_exact_int(dir_block["valid_target_count_local"], "directional.valid_target_count_local", minimum=0, maximum=pair_count)
+    d_vt_anc = require_exact_int(dir_block["valid_target_count_anchor"], "directional.valid_target_count_anchor", minimum=0, maximum=pair_count)
+
+    rc_block = report["raw_cosine"]
+    rc_keys = {
+        "definition",
+        "local_mean",
+        "anchor_mean",
+        "mean",
+        "valid_both_count_local",
+        "valid_both_count_anchor",
+        "undefined_count_local",
+        "undefined_count_anchor",
+    }
+    if type(rc_block) is not dict or set(rc_block.keys()) != rc_keys:
+        raise ValueError("dev_report.raw_cosine keys invalid")
+    if type(rc_block["definition"]) is not str or not rc_block["definition"]:
+        raise ValueError("dev_report.raw_cosine.definition invalid")
+    vb_loc = require_exact_int(rc_block["valid_both_count_local"], "raw_cosine.valid_both_count_local", minimum=0, maximum=pair_count)
+    vb_anc = require_exact_int(rc_block["valid_both_count_anchor"], "raw_cosine.valid_both_count_anchor", minimum=0, maximum=pair_count)
+    un_loc = require_exact_int(rc_block["undefined_count_local"], "raw_cosine.undefined_count_local", minimum=0, maximum=pair_count)
+    un_anc = require_exact_int(rc_block["undefined_count_anchor"], "raw_cosine.undefined_count_anchor", minimum=0, maximum=pair_count)
+    if vb_loc + un_loc != pair_count or vb_anc + un_anc != pair_count:
+        raise ValueError("dev_report.raw_cosine valid + undefined counts do not sum to 147")
+    rc_loc = rc_block["local_mean"]
+    rc_anc = rc_block["anchor_mean"]
+    rc_mean = rc_block["mean"]
+    for head_name, count_val, raw_val in (("local", vb_loc, rc_loc), ("anchor", vb_anc, rc_anc)):
+        if count_val == 0:
+            if raw_val is not None:
+                raise ValueError(f"raw_cosine.{head_name}_mean must be None when valid_both_count == 0")
+        else:
+            hv = _require_finite_number(raw_val, f"raw_cosine.{head_name}_mean")
+            if hv < -1.0 - 1e-9 or hv > 1.0 + 1e-9:
+                raise ValueError(f"raw_cosine.{head_name}_mean out of [-1, 1]")
+    if rc_loc is not None and rc_anc is not None:
+        rm = _require_finite_number(rc_mean, "raw_cosine.mean")
+        if abs(0.5 * (float(rc_loc) + float(rc_anc)) - rm) > DEV_REPORT_RECOMPUTE_TOL:
+            raise ValueError("raw_cosine.mean inconsistent with head means")
+    elif rc_mean is not None:
+        raise ValueError("raw_cosine.mean must be None when either head is undefined")
+
+    mag_block = report["magnitude_log_ratio_loss"]
+    mag_keys = {"definition", "local_mean", "anchor_mean", "mean"}
+    if type(mag_block) is not dict or set(mag_block.keys()) != mag_keys:
+        raise ValueError("dev_report.magnitude_log_ratio_loss keys invalid")
+    if type(mag_block["definition"]) is not str or not mag_block["definition"]:
+        raise ValueError("dev_report.magnitude_log_ratio_loss.definition invalid")
+    m_loc = _require_finite_number(mag_block["local_mean"], "magnitude.local_mean")
+    m_anc = _require_finite_number(mag_block["anchor_mean"], "magnitude.anchor_mean")
+    m_mean = _require_finite_number(mag_block["mean"], "magnitude.mean")
+    if m_loc < 0.0 or m_anc < 0.0 or abs(0.5 * (m_loc + m_anc) - m_mean) > DEV_REPORT_RECOMPUTE_TOL:
+        raise ValueError("magnitude_log_ratio_loss mean inconsistent")
+
+    nr_block = report["norms_and_ratios"]
+    nr_keys = {
+        "pred_norm_mean_local",
+        "pred_norm_mean_anchor",
+        "target_norm_mean_local",
+        "target_norm_mean_anchor",
+        "raw_norm_ratio_mean_local",
+        "raw_norm_ratio_mean_anchor",
+        "zero_pred_count_local",
+        "zero_pred_count_anchor",
+        "zero_target_count_local",
+        "zero_target_count_anchor",
+        "undefined_ratio_count_local",
+        "undefined_ratio_count_anchor",
+    }
+    if type(nr_block) is not dict or set(nr_block.keys()) != nr_keys:
+        raise ValueError("dev_report.norms_and_ratios keys invalid")
+    for k in ("pred_norm_mean_local", "pred_norm_mean_anchor", "target_norm_mean_local", "target_norm_mean_anchor"):
+        if _require_finite_number(nr_block[k], f"norms_and_ratios.{k}") < 0.0:
+            raise ValueError(f"norms_and_ratios.{k} must be non-negative")
+    require_exact_int(nr_block["zero_pred_count_local"], "norms_and_ratios.zero_pred_count_local", minimum=0, maximum=pair_count)
+    require_exact_int(nr_block["zero_pred_count_anchor"], "norms_and_ratios.zero_pred_count_anchor", minimum=0, maximum=pair_count)
+    zt_loc = require_exact_int(nr_block["zero_target_count_local"], "norms_and_ratios.zero_target_count_local", minimum=0, maximum=pair_count)
+    zt_anc = require_exact_int(nr_block["zero_target_count_anchor"], "norms_and_ratios.zero_target_count_anchor", minimum=0, maximum=pair_count)
+    ur_loc = require_exact_int(nr_block["undefined_ratio_count_local"], "norms_and_ratios.undefined_ratio_count_local", minimum=0, maximum=pair_count)
+    ur_anc = require_exact_int(nr_block["undefined_ratio_count_anchor"], "norms_and_ratios.undefined_ratio_count_anchor", minimum=0, maximum=pair_count)
+    if zt_loc != ur_loc or zt_anc != ur_anc:
+        raise ValueError("zero_target_count must equal undefined_ratio_count")
+    if d_vt_loc + zt_loc != pair_count or d_vt_anc + zt_anc != pair_count:
+        raise ValueError("valid_target_count + zero_target_count must equal 147")
+    for head_name, zero_t in (("local", zt_loc), ("anchor", zt_anc)):
+        ratio_val = nr_block[f"raw_norm_ratio_mean_{head_name}"]
+        if zero_t == pair_count:
+            if ratio_val is not None:
+                raise ValueError(f"raw_norm_ratio_mean_{head_name} must be None when all targets are zero")
+        elif _require_finite_number(ratio_val, f"norms_and_ratios.raw_norm_ratio_mean_{head_name}") < 0.0:
+            raise ValueError(f"norms_and_ratios.raw_norm_ratio_mean_{head_name} must be non-negative")
+
+    return {
+        "recomputed_macro": float(recomputed_macro),
+        "recomputed_no_motion_macro": float(recomputed_nm),
+        "recomputed_delta_vs_no_motion": float(recomputed_delta),
+        "video_count": video_count,
+        "pair_count": pair_count,
+        "control_plane_fixture": is_cp_fixture,
+        "scientific_metric_valid": sci_valid,
+    }
+
+
+def _validate_dev_report_bytes(raw: bytes, *, expected_macro: float) -> tuple[dict, str]:
+    if type(raw) is not bytes or len(raw) < 2 or len(raw) > MAX_DEV_REPORT_BYTES:
+        raise ValueError("dev_report.json must be bounded canonical bytes")
+    report = strict_json_loads(raw, max_bytes=MAX_DEV_REPORT_BYTES)
+    if type(report) is not dict:
+        raise ValueError("dev_report.json must decode to an object")
+    if canonical_json_bytes(report, max_bytes=MAX_DEV_REPORT_BYTES) != raw:
+        raise ValueError("dev_report.json bytes are not canonical")
+    verify_dev_report_consistency(
+        report,
+        expected_macro=float(expected_macro),
+        require_scientific_metric=False,
+    )
     return report, hashlib.sha256(raw).hexdigest()
 
 

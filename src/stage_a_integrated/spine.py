@@ -12,9 +12,11 @@ from .authorization import (
     OWNER_TRUST_STATUS_PENDING,
     RESUME_POLICY_FRESH,
     RESUME_POLICY_LAST,
+    assert_external_trust_boundary,
     canonical_resolved_path,
     finalize_release_nonce,
     load,
+    observe_trusted_utc_now,
     reserve_release_nonce,
 )
 from .checkpoints import (
@@ -116,6 +118,55 @@ from .trainer import optimizer_step
 
 CONFIG_SCHEMA_VERSION = "stage-a-config-v1"
 TRAIN_TEMPORAL_AXIS_SEMANTICS = "SYNTHETIC_PINNED_LABELS_0_2_9_10_40"
+FRESH_SEED_DETERMINISM_POLICY = "cpu_fresh_seed_python_numpy_torch_single_process_no_gpu_claim"
+
+
+def _seed_fresh_cpu_rng(seed: int) -> None:
+    """Bind Python, NumPy, and Torch CPU RNG initialization to resolved seed on fresh runs only."""
+    import random
+
+    import numpy
+    import torch
+
+    seed_val = require_exact_int(seed, "seed", minimum=0, maximum=MAX_SEED)
+    random.seed(seed_val)
+    numpy.random.seed(seed_val)
+    torch.manual_seed(seed_val)
+
+
+def _collect_runtime_environment() -> dict:
+    import platform
+    import sys
+
+    import numpy
+    import torch
+
+    return {
+        "python_version": sys.version.split()[0],
+        "torch_version": str(torch.__version__),
+        "numpy_version": str(numpy.__version__),
+        "platform": platform.platform(),
+        "device": "cpu",
+        "torch_num_threads": int(torch.get_num_threads()),
+        "torch_num_interop_threads": int(torch.get_num_interop_threads()),
+        "gpu_determinism_claimed": False,
+    }
+
+
+def _model_params_sha256(model) -> str:
+    import torch
+
+    hasher = hashlib.sha256(b"STCA-MODEL-PARAMS-V1\x00")
+    state = model.state_dict()
+    for name in sorted(state.keys()):
+        tensor = state[name].detach().contiguous().cpu()
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\x00")
+        hasher.update(str(tensor.dtype).encode("utf-8"))
+        hasher.update(str(tuple(tensor.shape)).encode("utf-8"))
+        raw_u8 = tensor.to(torch.uint8) if tensor.dtype == torch.bool else tensor.view(torch.uint8)
+        hasher.update(raw_u8.numpy().tobytes())
+    return hasher.hexdigest()
 
 REQUIRED_CONFIG_KEYS = frozenset(
     {
@@ -448,6 +499,7 @@ def _sync_expected_with_config(expected: dict, resolved: dict, *, resume_policy:
     verified["revocation_path"] = resolved["revocation_path"]
     if "nonce_ledger_path" in verified and canonical_resolved_path(verified["nonce_ledger_path"], "expected.nonce_ledger_path") != resolved["nonce_ledger_path"]:
         raise ExecutionNotAuthorized("expected.nonce_ledger_path disagrees with resolved effective config")
+    verified["nonce_ledger_path"] = resolved["nonce_ledger_path"]
     if "effective_config_sha256" in verified and verified["effective_config_sha256"] != resolved["effective_config_sha256"]:
         raise ExecutionNotAuthorized("expected.effective_config_sha256 disagrees with resolved effective config")
     verified["effective_config_sha256"] = resolved["effective_config_sha256"]
@@ -511,8 +563,17 @@ def run_synthetic(
         revocation_path=resolved["revocation_path"],
         allow_synthetic_test_trust=allow_synthetic_test_trust,
     )
-    ledger_path = Path(resolved["nonce_ledger_path"])
-    reserve_release_nonce(ledger_path, release, now=verified_expected["now"])
+    forbidden_boundary_roots = (
+        (root, Path(release.checkout_root))
+        if release.checkout_root is not None
+        else (root,)
+    )
+    ledger_path = assert_external_trust_boundary(
+        resolved["nonce_ledger_path"],
+        label="nonce_ledger_path",
+        forbidden_roots=forbidden_boundary_roots,
+    )
+    reserve_release_nonce(ledger_path, release, now=release.observed_now)
 
     run_succeeded = False
     final_commit_sha256: str | None = resume_from_commit_sha256
@@ -623,8 +684,10 @@ def run_synthetic(
 
         import torch
 
+        is_fresh_run = resume_payload is None
+        runtime_environment = _collect_runtime_environment()
         caller_rng_snapshot: tuple | None = None
-        if resume_payload is not None:
+        if not is_fresh_run:
             try:
                 caller_rng_snapshot = capture_cpu_rng_snapshot()
             except Exception as exc:
@@ -636,6 +699,8 @@ def run_synthetic(
                 )
                 raise
         try:
+            if is_fresh_run:
+                _seed_fresh_cpu_rng(seed)
             model_cls, config_cls = load_class()
             model = model_cls(config_cls())
             opt = torch.optim.AdamW(
@@ -709,6 +774,7 @@ def run_synthetic(
             events = [int(event) for event in restored["events"]]
             macros = {int(step): float(value) for step, value in restored["macros"].items()}
             exposure_frames = list(restored["exposure_frames"])
+        initial_model_state_sha256 = _model_params_sha256(model)
 
         release_audit = {
             "ticket_id": release.get("ticket_id"),
@@ -854,6 +920,8 @@ def run_synthetic(
                         "exposure_schema": SCHEMA_VERSION,
                         "exposure_journal_sha256": exposure_journal_sha256,
                         "last_receipt_sha256": last_receipt_sha256,
+                        "determinism_policy": FRESH_SEED_DETERMINISM_POLICY,
+                        "runtime_environment": runtime_environment,
                         "provenance": step_provenance,
                         "macro": value,
                         "dev_report_sha256": dev_report_sha256,
@@ -944,6 +1012,16 @@ def run_synthetic(
             "dev_report_sha256s": dev_report_sha256s,
             "signal_statuses": signal_statuses,
             "last_dev_report": last_dev_report,
+            "determinism_policy": FRESH_SEED_DETERMINISM_POLICY,
+            "fresh_seed_applied": is_fresh_run,
+            "runtime_environment": runtime_environment,
+            "initial_model_state_sha256": initial_model_state_sha256,
+            "admission_mode": release.admission_mode,
+            "observed_code_commit_sha": release.observed_code_commit_sha,
+            "observed_code_tree_sha": release.observed_code_tree_sha,
+            "observed_admission_utc": release.observed_now,
+            "git_clean": release.git_clean,
+            "module_origin_verified": release.module_origin_verified,
             "release_ticket_id": release.get("ticket_id"),
             "release_sha256": release.release_sha256,
             "owner_trust_anchor_sha256": release.trust_anchor_sha256,
@@ -953,12 +1031,17 @@ def run_synthetic(
         }
     finally:
         outcome = "COMPLETED" if run_succeeded else "FAILED"
+        finalize_now = (
+            release.observed_now
+            if (allow_synthetic_test_trust and expected.get("now") is not None)
+            else observe_trusted_utc_now()
+        )
         if run_succeeded:
             finalize_release_nonce(
                 ledger_path,
                 release,
                 outcome=outcome,
-                now=verified_expected["now"],
+                now=finalize_now,
                 final_commit_sha256=final_commit_sha256,
             )
         else:
@@ -967,7 +1050,7 @@ def run_synthetic(
                     ledger_path,
                     release,
                     outcome=outcome,
-                    now=verified_expected["now"],
+                    now=finalize_now,
                     final_commit_sha256=final_commit_sha256,
                 )
             except Exception:

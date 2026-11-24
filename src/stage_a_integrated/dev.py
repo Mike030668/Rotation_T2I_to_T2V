@@ -12,6 +12,7 @@ from .checkpoints import (
     _read_bounded_bytes,
     capture_cpu_rng_snapshot,
     restore_cpu_rng_snapshot,
+    verify_dev_report_consistency,
 )
 from .exposure import strict_json_loads
 from .forward_binding import (
@@ -586,6 +587,210 @@ def evaluate_with_diagnostics(
             "undefined_ratio_count_anchor": zero_tgt_anchor,
         },
         "dev_forward_digests_sha256": digest_chain.hexdigest(),
+        "control_plane_fixture": False,
+        "scientific_metric_valid": True,
+    }
+
+
+def collect_singleton_dev_pair_records(
+    model,
+    items: list[dict],
+    expected: set[tuple],
+    *,
+    expected_digests: dict[tuple, str] | None = None,
+    forbidden_video_ids: set[str] | None = None,
+    require_external_expectations: bool = False,
+) -> list[dict]:
+    """Evaluate exact 147 DEV pairs via verified singleton forward calls and return per-pair records."""
+    import torch
+
+    if type(expected) is not set or len(expected) != EXPECTED_DEV_PAIRS:
+        raise ValueError("expected DEV key set must contain exact 147 pairs")
+    expected_videos = {key[0] for key in expected}
+    if len(expected_videos) != EXPECTED_DEV_VIDEOS:
+        raise ValueError("expected DEV key set must span exact 50 videos")
+
+    pinned_train_ids = set(train_ids())
+    if require_external_expectations:
+        if expected_digests is None or forbidden_video_ids is None:
+            raise ValueError("canonical DEV evaluation requires external expected_digests and forbidden_video_ids")
+        if set(forbidden_video_ids) != pinned_train_ids:
+            raise ValueError("forbidden_video_ids disagrees with pinned 400-video train split")
+
+    forbidden = pinned_train_ids if forbidden_video_ids is None else set(forbidden_video_ids)
+    if not expected_videos.isdisjoint(forbidden) or not expected_videos.isdisjoint(pinned_train_ids):
+        raise ValueError("DEV evaluation contains train/forbidden video IDs")
+
+    if expected_digests is not None:
+        if type(expected_digests) is not dict or set(expected_digests.keys()) != expected:
+            raise ValueError("expected_digests keys do not match frozen 147 DEV pairs")
+
+    if type(items) is not list or len(items) != EXPECTED_DEV_PAIRS:
+        raise ValueError("dev items length must equal 147 with zero silent drops or duplicates")
+
+    seen: set[tuple] = set()
+    verified_entries: list[tuple[tuple, dict, dict, str]] = []
+    for item in items:
+        if type(item) is not dict:
+            raise ValueError("dev item must be a dict")
+        key = (item.get("id_movi"), item.get("current"), item.get("target"), item.get("horizon"))
+        if key not in expected or key in seen:
+            raise ValueError("dev pair is missing from or duplicated relative to frozen 147")
+        if key[0] in forbidden:
+            raise ValueError("dev item belongs to forbidden train split")
+        seen.add(key)
+        exp_digest = (
+            expected_digests[key]
+            if expected_digests is not None
+            else expected_synthetic_forward_digest(
+                item.get("id_movi"),
+                item.get("ids_frames"),
+                item.get("history"),
+                item.get("current"),
+                item.get("target"),
+                item.get("horizon"),
+            )
+        )
+        frozen_kwargs = prepare_verified_forward_call(
+            item,
+            expected_digest=exp_digest,
+            context="dev",
+            verify_canonical_supervision=True,
+        )
+        assert_no_target_leak(item, verify_canonical_oracle=True)
+        verified_entries.append((key, frozen_kwargs, item["supervision"], exp_digest))
+
+    was_training = _assert_uniform_module_mode(model)
+    had_last_sem = hasattr(model, "_last_semantic_context")
+    prev_last_sem = getattr(model, "_last_semantic_context", None)
+    if isinstance(prev_last_sem, torch.Tensor):
+        prev_last_sem = prev_last_sem.detach().clone()
+    pre_state_digest = _model_state_and_grad_digest(model)
+    pre_rng = capture_cpu_rng_snapshot()
+
+    pair_records: list[dict] = []
+    eval_exc: Exception | None = None
+    try:
+        model.eval()
+        with torch.no_grad():
+            for key, frozen_kwargs, supervision, exp_digest in verified_entries:
+                output = model.forward(**frozen_kwargs)
+                if type(output) is not dict or "delta_local" not in output or "delta_anchor" not in output:
+                    raise ValueError("model.forward output missing delta_local/delta_anchor")
+                pred_local = output["delta_local"]
+                pred_anchor = output["delta_anchor"]
+                for pred_name, pred_tensor in (("delta_local", pred_local), ("delta_anchor", pred_anchor)):
+                    if (
+                        not isinstance(pred_tensor, torch.Tensor)
+                        or pred_tensor.device.type != "cpu"
+                        or pred_tensor.dtype != torch.float32
+                        or tuple(pred_tensor.shape) != (1, WIDTH)
+                        or not bool(torch.isfinite(pred_tensor).all().item())
+                    ):
+                        raise ValueError(f"nonfinite or malformed DEV output {pred_name}")
+                tgt_local = supervision["target_delta_local"]
+                tgt_anchor = supervision["target_delta_anchor"]
+                local = torch.nn.functional.smooth_l1_loss(pred_local, tgt_local, beta=BETA)
+                anchor = torch.nn.functional.smooth_l1_loss(pred_anchor, tgt_anchor, beta=BETA)
+                pair_loss = float(LOCAL_WEIGHT * float(local.item()) + ANCHOR_WEIGHT * float(anchor.item()))
+                zeros = torch.zeros_like(tgt_local)
+                nm_local = float(torch.nn.functional.smooth_l1_loss(zeros, tgt_local, beta=BETA).item())
+                nm_anchor = float(torch.nn.functional.smooth_l1_loss(zeros, tgt_anchor, beta=BETA).item())
+                pair_nm = LOCAL_WEIGHT * nm_local + ANCHOR_WEIGHT * nm_anchor
+                if not math.isfinite(pair_loss) or not math.isfinite(pair_nm):
+                    raise ValueError("nonfinite DEV pair scalar")
+                id_movi, current, target, horizon = key
+                pair_records.append(
+                    {
+                        "id_movi": id_movi,
+                        "current": current,
+                        "target": target,
+                        "horizon": horizon,
+                        "pair_loss": pair_loss,
+                        "pair_no_motion": pair_nm,
+                        "forward_digest": exp_digest,
+                    }
+                )
+    except Exception as exc:
+        eval_exc = exc
+    finally:
+        model.train(was_training)
+        if had_last_sem:
+            model._last_semantic_context = prev_last_sem
+        elif hasattr(model, "_last_semantic_context"):
+            delattr(model, "_last_semantic_context")
+        post_modes = {bool(mod.training) for _, mod in model.named_modules()}
+        mode_ok = (post_modes == {was_training}) if post_modes else (bool(model.training) == was_training)
+        state_ok = _model_state_and_grad_digest(model) == pre_state_digest
+        rng_ok = _rng_snapshots_equal(pre_rng, capture_cpu_rng_snapshot())
+        if not (mode_ok and state_ok and rng_ok):
+            raise EvaluatorMutationError(
+                "DEV singleton pair collection mutated model mode, state, grads, or CPU RNG state",
+                mutation_details={"mode_restored": mode_ok, "state_unchanged": state_ok, "rng_unchanged": rng_ok},
+                original_error=None if eval_exc is None else str(eval_exc),
+            ) from eval_exc
+    if eval_exc is not None:
+        raise eval_exc
+    return pair_records
+
+
+def aggregate_partitioned_dev_losses(pair_records: list[dict], partitions: list[list[int]]) -> dict:
+    """Aggregate fixed singleton DEV pair losses over an arbitrary partition/ordering of the 147 predictions."""
+    if type(pair_records) is not list or len(pair_records) != EXPECTED_DEV_PAIRS:
+        raise ValueError("pair_records must contain exact 147 pairs")
+    if type(partitions) is not list or not partitions:
+        raise ValueError("partitions must be a nonempty list of index chunks")
+
+    seen_keys: set[tuple] = set()
+    for rec in pair_records:
+        key = (rec["id_movi"], rec["current"], rec["target"], rec["horizon"])
+        if key in seen_keys:
+            raise ValueError("duplicate pair in pair_records")
+        seen_keys.add(key)
+
+    seen_indices: list[int] = []
+    video_loss_sum: dict[str, float] = {}
+    video_nm_sum: dict[str, float] = {}
+    video_counts: dict[str, int] = {}
+    for chunk in partitions:
+        if type(chunk) not in (list, tuple) or not chunk:
+            raise ValueError("each partition chunk must be nonempty")
+        chunk_loss_sum: dict[str, float] = {}
+        chunk_nm_sum: dict[str, float] = {}
+        chunk_counts: dict[str, int] = {}
+        for raw_idx in chunk:
+            idx = require_exact_int(raw_idx, "partition.index", minimum=0, maximum=EXPECTED_DEV_PAIRS - 1)
+            seen_indices.append(idx)
+            rec = pair_records[idx]
+            vid = rec["id_movi"]
+            chunk_loss_sum[vid] = chunk_loss_sum.get(vid, 0.0) + float(rec["pair_loss"])
+            chunk_nm_sum[vid] = chunk_nm_sum.get(vid, 0.0) + float(rec["pair_no_motion"])
+            chunk_counts[vid] = chunk_counts.get(vid, 0) + 1
+        for vid in sorted(chunk_counts):
+            video_loss_sum[vid] = video_loss_sum.get(vid, 0.0) + chunk_loss_sum[vid]
+            video_nm_sum[vid] = video_nm_sum.get(vid, 0.0) + chunk_nm_sum[vid]
+            video_counts[vid] = video_counts.get(vid, 0) + chunk_counts[vid]
+
+    if len(seen_indices) != EXPECTED_DEV_PAIRS or set(seen_indices) != set(range(EXPECTED_DEV_PAIRS)):
+        raise ValueError("partitions must cover 0..146 exactly once")
+    if len(video_counts) != EXPECTED_DEV_VIDEOS or sum(video_counts.values()) != EXPECTED_DEV_PAIRS:
+        raise ValueError("aggregated predictions do not span 50 videos / 147 pairs")
+
+    ordered_vids = sorted(video_counts.keys())
+    per_video_macro = {vid: video_loss_sum[vid] / video_counts[vid] for vid in ordered_vids}
+    per_video_nm = {vid: video_nm_sum[vid] / video_counts[vid] for vid in ordered_vids}
+    macro = sum(per_video_macro.values()) / float(EXPECTED_DEV_VIDEOS)
+    nm_macro = sum(per_video_nm.values()) / float(EXPECTED_DEV_VIDEOS)
+    return {
+        "macro": float(macro),
+        "no_motion_macro": float(nm_macro),
+        "video_count": EXPECTED_DEV_VIDEOS,
+        "pair_count": EXPECTED_DEV_PAIRS,
+        "per_video_macro": per_video_macro,
+        "per_video_counts": {vid: video_counts[vid] for vid in ordered_vids},
+        "partition_sizes": [len(chunk) for chunk in partitions],
+        "singleton_forward_only": True,
+        "batched_forward_claimed": False,
     }
 
 
