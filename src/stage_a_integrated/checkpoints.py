@@ -1,7 +1,9 @@
-"""Bounded stca-v2 checkpoints, staged resume validation, prov-v1, and crash-safe BEST/LAST."""
+"""Bounded stca-v2 checkpoints, semantic staging, external prov-v1, and atomic BEST/LAST commits."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import io
 import math
@@ -26,8 +28,16 @@ CHECKPOINT_SCHEMA_VERSION = "stca-v2"
 MANIFEST_SCHEMA_VERSION = "ckpt-manifest-v1"
 PROVENANCE_SCHEMA_VERSION = "prov-v1"
 POINTER_SCHEMA_VERSION = "ptr-v1"
+COMMIT_SCHEMA_VERSION = "commit-v1"
 FAILURE_RECEIPT_SCHEMA_VERSION = "fail-receipt-v1"
 OWNER_TRUST_ROOT_STATUS = "PENDING_OWNER_C4"
+RNG_SCOPE = "cpu_only"
+
+EXPECTED_ADAMW_LR = 1e-4
+EXPECTED_ADAMW_WEIGHT_DECAY = 1e-4
+EXPECTED_ADAMW_BETAS = (0.9, 0.999)
+EXPECTED_ADAMW_EPS = 1e-8
+EXPECTED_ADAMW_AMSGRAD = False
 
 SECTIONS = ("model", "adamw", "python_rng", "numpy_rng", "torch_rng", "sampler", "exposure")
 
@@ -38,6 +48,8 @@ MAX_RNG_SECTION_BYTES = 65536
 MAX_CHECKPOINT_BYTES = 256 * 1024 * 1024
 MAX_POINTER_BYTES = 16384
 MAX_MANIFEST_BYTES = 65536
+MAX_COMMIT_BYTES = 131072
+MAX_BEST_HISTORY = 1024
 MAX_HORIZONS_FILE_BYTES = 16 * 1024 * 1024
 MAX_FAILURE_RECEIPTS = 1024
 
@@ -60,6 +72,54 @@ SECTION_MAX_BYTES = {
     "exposure": MAX_JOURNAL_BYTES,
 }
 
+PROVENANCE_KEYS = frozenset(
+    {
+        "provenance_schema",
+        "checkpoint_schema",
+        "manifest_schema",
+        "pointer_schema",
+        "commit_schema",
+        "failure_receipt_schema",
+        "rng_scope",
+        "source_id",
+        "source_sha256",
+        "candidate_sha256",
+        "loss_sha256",
+        "horizons_sha256",
+        "horizons_file_sha256",
+        "sampler_sha256",
+        "exposure_schema",
+        "sampler_schema",
+        "remainder_policy",
+        "forward_binding",
+        "effective_config_sha256",
+        "generation_id",
+        "owner_trust_root_status",
+        "release_created",
+    }
+)
+
+
+class PostCommitError(RuntimeError):
+    """Raised when a failure occurs after CURRENT_COMMIT has been durably replaced."""
+
+    def __init__(self, message: str, *, generation_id: str, commit_sha256: str) -> None:
+        super().__init__(message)
+        self.generation_id = generation_id
+        self.commit_sha256 = commit_sha256
+        self.commit_durable = True
+
+
+class FatalRollbackError(RuntimeError):
+    """Raised when state/RNG rollback itself fails; process state is tainted and must terminate."""
+
+    def __init__(self, message: str, *, original_error: str, rollback_errors: list[str]) -> None:
+        super().__init__(message)
+        self.original_error = original_error
+        self.rollback_errors = list(rollback_errors)
+        self.fatal = True
+        self.must_terminate_process = True
+
 
 def _is_hex64(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(ch in HEX_CHARS for ch in value)
@@ -69,6 +129,20 @@ def _require_hex64(value: object, name: str) -> str:
     if not _is_hex64(value):
         raise ValueError(f"{name} must be a 64-char lowercase hex sha256")
     return str(value)
+
+
+def _require_finite_number(value: object, name: str) -> float:
+    if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite int or float")
+    return float(value)
+
+
+def _reject_root_if_scored(root: Path) -> Path:
+    if not isinstance(root, Path):
+        root = Path(root)
+    if "_scored_event_pkg" in str(root):
+        raise ValueError("checkpoint root rejected")
+    return root
 
 
 def parse_generation_id(generation_id: object) -> int:
@@ -133,6 +207,26 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+@contextmanager
+def _single_writer_lock(root: Path):
+    root = _reject_root_if_scored(root)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".writer.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        raise RuntimeError("checkpoint root is locked by another writer") from exc
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def build_expected_provenance(
     effective_config_bytes: bytes,
     horizons_path: Path,
@@ -149,12 +243,16 @@ def build_expected_provenance(
         if horizons_file_sha256 is not None
         else file_sha256(horizons_path, max_bytes=MAX_HORIZONS_FILE_BYTES)
     )
+    if horizons_digest != HORIZONS_SHA256:
+        raise ValueError("horizons file sha256 does not match pinned HORIZONS_SHA256")
     return {
         "provenance_schema": PROVENANCE_SCHEMA_VERSION,
         "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
+        "commit_schema": COMMIT_SCHEMA_VERSION,
         "failure_receipt_schema": FAILURE_RECEIPT_SCHEMA_VERSION,
+        "rng_scope": RNG_SCOPE,
         "source_id": SYNTHETIC_SOURCE_ID,
         "source_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "candidate_sha256": CANDIDATE_SHA256,
@@ -180,41 +278,22 @@ def verify_baseline_provenance(header: dict) -> dict:
     prov = header.get("provenance")
     if type(prov) is not dict:
         raise ValueError("checkpoint header missing prov-v1 provenance")
-    required_keys = {
-        "provenance_schema",
-        "checkpoint_schema",
-        "manifest_schema",
-        "pointer_schema",
-        "failure_receipt_schema",
-        "source_id",
-        "source_sha256",
-        "candidate_sha256",
-        "loss_sha256",
-        "horizons_sha256",
-        "horizons_file_sha256",
-        "sampler_sha256",
-        "exposure_schema",
-        "sampler_schema",
-        "remainder_policy",
-        "forward_binding",
-        "effective_config_sha256",
-        "generation_id",
-        "owner_trust_root_status",
-        "release_created",
-    }
-    if set(prov) != required_keys:
+    if set(prov) != PROVENANCE_KEYS:
         raise ValueError("checkpoint provenance field set invalid")
     expected_pins = {
         "provenance_schema": PROVENANCE_SCHEMA_VERSION,
         "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
+        "commit_schema": COMMIT_SCHEMA_VERSION,
         "failure_receipt_schema": FAILURE_RECEIPT_SCHEMA_VERSION,
+        "rng_scope": RNG_SCOPE,
         "source_id": SYNTHETIC_SOURCE_ID,
         "source_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "candidate_sha256": CANDIDATE_SHA256,
         "loss_sha256": LOSS_SHA256,
         "horizons_sha256": HORIZONS_SHA256,
+        "horizons_file_sha256": HORIZONS_SHA256,
         "sampler_sha256": SAMPLER_SHA256,
         "exposure_schema": SCHEMA_VERSION,
         "sampler_schema": SAMPLER_SCHEMA_VERSION,
@@ -243,18 +322,29 @@ def verify_baseline_provenance(header: dict) -> dict:
     return prov
 
 
-def verify_checkpoint_provenance(header: dict, expected_provenance: dict) -> dict:
+def verify_checkpoint_provenance(
+    header: dict,
+    expected_provenance: dict,
+    *,
+    expected_generation_id: str | None = None,
+) -> dict:
     if type(expected_provenance) is not dict:
         raise ValueError("expected_provenance must be a dict")
+    if set(expected_provenance) != PROVENANCE_KEYS:
+        raise ValueError("expected_provenance field set invalid")
     prov = verify_baseline_provenance(header)
-    if set(prov) != set(expected_provenance):
-        raise ValueError("checkpoint provenance field set mismatch")
     for key, expected_val in expected_provenance.items():
         if key == "generation_id":
-            if expected_val is not None and prov[key] != expected_val:
-                raise ValueError("checkpoint provenance.generation_id mismatch")
+            if expected_val is not None:
+                parse_generation_id(expected_val)
+                if prov[key] != expected_val:
+                    raise ValueError("checkpoint provenance.generation_id mismatch")
         elif prov[key] != expected_val or type(prov[key]) is not type(expected_val):
             raise ValueError(f"checkpoint provenance.{key} mismatch")
+    if expected_generation_id is not None:
+        parse_generation_id(expected_generation_id)
+        if prov["generation_id"] != expected_generation_id:
+            raise ValueError("checkpoint provenance.generation_id disagrees with expected_generation_id")
     return prov
 
 
@@ -387,9 +477,7 @@ def validate_python_rng_bytes(raw: bytes) -> tuple[int, tuple[int, ...], float |
     index = require_exact_int(raw_state[624], "python_rng.index", minimum=0, maximum=624)
     gauss = obj[2]
     if gauss is not None:
-        if type(gauss) not in (int, float) or isinstance(gauss, bool) or not math.isfinite(float(gauss)):
-            raise ValueError("python_rng.gauss must be null or finite float")
-        gauss = float(gauss)
+        gauss = _require_finite_number(gauss, "python_rng.gauss")
     return (version, tuple(words + [index]), gauss)
 
 
@@ -410,9 +498,8 @@ def validate_numpy_rng_bytes(raw: bytes) -> tuple[str, list[int], int, int, floa
     ]
     validated_pos = require_exact_int(pos, "numpy_rng.pos", minimum=0, maximum=624)
     validated_has_gauss = require_exact_int(has_gauss, "numpy_rng.has_gauss", minimum=0, maximum=1)
-    if type(cached) not in (int, float) or isinstance(cached, bool) or not math.isfinite(float(cached)):
-        raise ValueError("numpy_rng.cached must be finite numeric")
-    return (algo, validated_keys, validated_pos, validated_has_gauss, float(cached))
+    validated_cached = _require_finite_number(cached, "numpy_rng.cached")
+    return (algo, validated_keys, validated_pos, validated_has_gauss, validated_cached)
 
 
 def validate_torch_rng_bytes(raw: bytes, *, expected_len: int | None = None) -> bytes:
@@ -421,6 +508,39 @@ def validate_torch_rng_bytes(raw: bytes, *, expected_len: int | None = None) -> 
     if expected_len is not None and len(raw) != expected_len:
         raise ValueError(f"torch_rng byte length mismatch ({len(raw)} != {expected_len})")
     return raw
+
+
+def capture_cpu_rng_snapshot() -> tuple:
+    import random
+
+    import numpy
+    import torch
+
+    py_state = random.getstate()
+    np_algo, np_keys, np_pos, np_has_gauss, np_cached = numpy.random.get_state()
+    np_state = (np_algo, np_keys.copy(), np_pos, np_has_gauss, np_cached)
+    torch_state = torch.get_rng_state().clone()
+    return (py_state, np_state, torch_state)
+
+
+def restore_cpu_rng_snapshot(snapshot: tuple) -> list[str]:
+    import random
+
+    import numpy
+    import torch
+
+    py_state, np_state, torch_state = snapshot
+    errors: list[str] = []
+    for name, action in (
+        ("python_rng", lambda: random.setstate(py_state)),
+        ("numpy_rng", lambda: numpy.random.set_state(np_state)),
+        ("torch_rng", lambda: torch.set_rng_state(torch_state)),
+    ):
+        try:
+            action()
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    return errors
 
 
 def stage_python_rng(raw: bytes) -> tuple[int, tuple[int, ...], float | None]:
@@ -458,9 +578,13 @@ def stage_model_state(raw: bytes, model) -> dict:
         raise ValueError("model state_dict key set mismatch")
     staged = {}
     for key, ref_tensor in expected_state.items():
+        if ref_tensor.device.type != "cpu":
+            raise ValueError(f"live model state {key} must be on cpu under C2 contract")
         tensor = loaded[key]
         if not isinstance(tensor, torch.Tensor):
             raise ValueError(f"model state {key} is not a Tensor")
+        if tensor.device.type != "cpu":
+            raise ValueError(f"model state {key} must be on cpu")
         if tensor.shape != ref_tensor.shape or tensor.dtype != ref_tensor.dtype:
             raise ValueError(f"model state {key} shape/dtype mismatch")
         if (tensor.is_floating_point() or tensor.is_complex()) and not bool(torch.isfinite(tensor).all().item()):
@@ -483,44 +607,61 @@ def _clone_state_value(value):
     return value
 
 
-def _validate_adamw_slot(slot: object, expected_shape, *, completed: int) -> dict:
+def _validate_adamw_slot(slot: object, live_param, *, completed: int) -> dict:
     import torch
 
     if type(slot) is not dict:
         raise ValueError("adamw state entry must be a dict")
-    if not slot:
-        if completed == 0:
-            return {}
-        raise ValueError("adamw state entry unexpectedly empty after updates")
-    if completed > 0 and not {"step", "exp_avg", "exp_avg_sq"}.issubset(slot.keys()):
-        raise ValueError("adamw state entry missing required AdamW tensors")
+    if set(slot.keys()) != {"step", "exp_avg", "exp_avg_sq"}:
+        raise ValueError("adamw state entry must contain exact keys {step, exp_avg, exp_avg_sq}")
+    if live_param.device.type != "cpu" or not live_param.is_floating_point():
+        raise ValueError("live parameter must be a floating-point CPU tensor")
+
     validated = {}
-    for field, val in slot.items():
-        if isinstance(val, torch.Tensor):
-            if val.is_floating_point() or val.is_complex():
-                if not bool(torch.isfinite(val).all().item()):
-                    raise ValueError(f"adamw state {field} contains nonfinite values")
-            if field in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq") and val.shape != expected_shape:
-                raise ValueError(f"adamw state {field} tensor shape mismatch")
-            if field == "step":
-                if val.ndim != 0 or float(val.item()) < 0.0:
-                    raise ValueError("adamw state step tensor must be non-negative scalar")
-            validated[field] = val.detach().clone()
-        elif field == "step":
-            step_val = require_exact_int(val, "adamw.step", minimum=0)
-            validated[field] = step_val
-        elif type(val) in (int, float, bool, str) or val is None:
-            if type(val) is float and not math.isfinite(val):
-                raise ValueError(f"adamw state {field} is nonfinite")
-            validated[field] = val
-        else:
-            raise ValueError(f"adamw state {field} has unsupported type")
+    for field in ("exp_avg", "exp_avg_sq"):
+        tensor = slot[field]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"adamw state {field} must be a Tensor")
+        if tensor.device.type != "cpu":
+            raise ValueError(f"adamw state {field} must be on cpu")
+        if tensor.shape != live_param.shape or tensor.dtype != live_param.dtype or not tensor.is_floating_point():
+            raise ValueError(f"adamw state {field} shape/dtype mismatch")
+        if not bool(torch.isfinite(tensor).all().item()):
+            raise ValueError(f"adamw state {field} contains nonfinite values")
+        if field == "exp_avg_sq" and not bool((tensor >= 0).all().item()):
+            raise ValueError("adamw state exp_avg_sq contains negative entries")
+        validated[field] = tensor.detach().clone()
+
+    step_val = slot["step"]
+    if isinstance(step_val, torch.Tensor):
+        if step_val.device.type != "cpu" or step_val.ndim != 0 or step_val.dtype == torch.bool or step_val.is_complex():
+            raise ValueError("adamw state step tensor must be non-bool real CPU scalar")
+        if not bool(torch.isfinite(step_val).item()):
+            raise ValueError("adamw state step tensor is nonfinite")
+        step_num = float(step_val.item())
+        if not step_num.is_integer() or int(step_num) != completed:
+            raise ValueError("adamw state step tensor must be integral and equal completed")
+        validated["step"] = step_val.detach().clone()
+    elif type(step_val) is int:
+        if step_val != completed:
+            raise ValueError("adamw state step int must equal completed")
+        validated["step"] = step_val
+    else:
+        raise ValueError("adamw state step must be an integral scalar Tensor or exact int")
+
     return validated
 
 
-def stage_adamw_state(raw: bytes, opt, *, completed: int = 1) -> dict:
+def stage_adamw_state(
+    raw: bytes,
+    opt,
+    *,
+    completed: int,
+    expected_updated_param_ids: set[int] | None = None,
+) -> dict:
     import torch
 
+    completed = require_exact_int(completed, "completed", minimum=0)
     if type(raw) is not bytes or len(raw) < 1 or len(raw) > MAX_ADAMW_SECTION_BYTES:
         raise ValueError("adamw section size out of bounds")
     loaded = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
@@ -530,36 +671,88 @@ def stage_adamw_state(raw: bytes, opt, *, completed: int = 1) -> dict:
     raw_state = loaded.get("state")
     if type(raw_groups) is not list or type(raw_state) is not dict:
         raise ValueError("adamw param_groups/state type invalid")
-    if len(raw_groups) != len(opt.param_groups) or not raw_groups:
+
+    live_sd = opt.state_dict()
+    live_sd_groups = live_sd["param_groups"]
+    if len(raw_groups) != len(opt.param_groups) or len(raw_groups) != len(live_sd_groups) or not raw_groups:
         raise ValueError("adamw param_groups count mismatch")
 
     saved_param_ids: list[int] = []
     live_params = []
-    staged_groups = []
-    for grp, live_grp in zip(raw_groups, opt.param_groups):
-        if type(grp) is not dict or type(grp.get("params")) is not list:
-            raise ValueError("adamw param_group malformed")
-        if len(grp["params"]) != len(live_grp["params"]):
+    for grp, live_grp, live_sd_grp in zip(raw_groups, opt.param_groups, live_sd_groups):
+        if type(grp) is not dict:
+            raise ValueError("adamw param_group must be a dict")
+        if set(grp.keys()) != set(live_sd_grp.keys()):
+            raise ValueError("adamw param_group option key set mismatch")
+
+        lr_val = _require_finite_number(grp["lr"], "adamw.lr")
+        wd_val = _require_finite_number(grp["weight_decay"], "adamw.weight_decay")
+        eps_val = _require_finite_number(grp["eps"], "adamw.eps")
+        if lr_val != EXPECTED_ADAMW_LR or lr_val != float(live_sd_grp["lr"]):
+            raise ValueError("adamw param_group lr disagrees with fixed contract")
+        if wd_val != EXPECTED_ADAMW_WEIGHT_DECAY or wd_val != float(live_sd_grp["weight_decay"]):
+            raise ValueError("adamw param_group weight_decay disagrees with fixed contract")
+        if eps_val != EXPECTED_ADAMW_EPS or eps_val != float(live_sd_grp["eps"]):
+            raise ValueError("adamw param_group eps disagrees with fixed contract")
+
+        betas_raw = grp["betas"]
+        if type(betas_raw) not in (tuple, list) or len(betas_raw) != 2:
+            raise ValueError("adamw param_group betas must be a 2-element tuple/list")
+        betas_val = (
+            _require_finite_number(betas_raw[0], "adamw.betas[0]"),
+            _require_finite_number(betas_raw[1], "adamw.betas[1]"),
+        )
+        live_betas = tuple(float(x) for x in live_sd_grp["betas"])
+        if betas_val != EXPECTED_ADAMW_BETAS or betas_val != live_betas:
+            raise ValueError("adamw param_group betas disagree with fixed contract")
+
+        if grp["amsgrad"] is not EXPECTED_ADAMW_AMSGRAD or live_sd_grp.get("amsgrad") is not EXPECTED_ADAMW_AMSGRAD:
+            raise ValueError("adamw param_group amsgrad disagrees with fixed contract")
+
+        for opt_key, live_opt_val in live_sd_grp.items():
+            if opt_key in ("params", "lr", "weight_decay", "betas", "eps", "amsgrad"):
+                continue
+            ckpt_opt_val = grp[opt_key]
+            if type(ckpt_opt_val) is not type(live_opt_val) or ckpt_opt_val != live_opt_val:
+                raise ValueError(f"adamw param_group option {opt_key} disagrees with live optimizer")
+
+        raw_pids = grp.get("params")
+        live_pids = live_sd_grp["params"]
+        if type(raw_pids) is not list or len(raw_pids) != len(live_grp["params"]) or len(raw_pids) != len(live_pids):
             raise ValueError("adamw param_group parameter count mismatch")
-        pids = [require_exact_int(pid, "adamw.param_id", minimum=0) for pid in grp["params"]]
+        pids = [require_exact_int(pid, "adamw.param_id", minimum=0) for pid in raw_pids]
+        if pids != [int(pid) for pid in live_pids]:
+            raise ValueError("adamw param_group parameter mapping/order mismatch")
         saved_param_ids.extend(pids)
         live_params.extend(live_grp["params"])
-        staged_groups.append(_clone_state_value(grp))
 
     if len(set(saved_param_ids)) != len(saved_param_ids):
         raise ValueError("adamw duplicate parameter id in param_groups")
-    id_to_shape = dict(zip(saved_param_ids, (p.shape for p in live_params)))
-    expected_state_pids = {
-        pid for pid, param in zip(saved_param_ids, live_params) if getattr(param, "requires_grad", True)
-    }
-    if completed > 0 and set(raw_state.keys()) != expected_state_pids:
+
+    # Preserve live fixed optimizer settings rather than adopting untrusted group dicts.
+    staged_groups = _clone_state_value(live_sd_groups)
+
+    if completed == 0:
+        if raw_state:
+            raise ValueError("adamw state must be empty when completed == 0")
+        return {"state": {}, "param_groups": staged_groups}
+
+    id_to_param = dict(zip(saved_param_ids, live_params))
+    # Every parameter with requires_grad=True in SplitterV3 participates unconditionally in
+    # SplitterV3.forward() -> SplitterV3Loss.forward()["total"], unless an explicit subset is given.
+    expected_pids = (
+        set(expected_updated_param_ids)
+        if expected_updated_param_ids is not None
+        else {pid for pid, param in id_to_param.items() if getattr(param, "requires_grad", True)}
+    )
+    if any(type(pid) is not int for pid in raw_state.keys()):
+        raise ValueError("adamw state keys must be exact ints")
+    if set(raw_state.keys()) != expected_pids:
         raise ValueError("adamw state entry set mismatch after completed updates")
 
     staged_state = {}
-    for pid, slot in raw_state.items():
-        if type(pid) is not int or isinstance(pid, bool) or pid not in id_to_shape:
-            raise ValueError("adamw state entry references unknown parameter id")
-        staged_state[pid] = _validate_adamw_slot(slot, id_to_shape[pid], completed=completed)
+    for pid in sorted(expected_pids):
+        staged_state[pid] = _validate_adamw_slot(raw_state[pid], id_to_param[pid], completed=completed)
     return {"state": staged_state, "param_groups": staged_groups}
 
 
@@ -569,16 +762,16 @@ def clone_optimizer_state_dict(opt) -> dict:
 
 def _safe_generation_relpath(root: Path, relpath: object, *, label: str) -> Path:
     if type(relpath) is not str or not relpath or relpath.startswith("/") or "\\" in relpath:
-        raise ValueError(f"pointer {label} must be a canonical relative POSIX path")
+        raise ValueError(f"{label} must be a canonical relative POSIX path")
     parts = relpath.split("/")
     if any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"pointer {label} contains invalid path segment")
+        raise ValueError(f"{label} contains invalid path segment")
     generations_root = (root / "generations").resolve()
     resolved = (root / relpath).resolve()
     try:
         resolved.relative_to(generations_root)
     except ValueError as exc:
-        raise ValueError(f"pointer {label} escapes generations root") from exc
+        raise ValueError(f"{label} escapes generations root") from exc
     return resolved
 
 
@@ -597,6 +790,8 @@ def _parse_pointer_bytes(root: Path, raw: bytes, expected_role: str | None = Non
         "macro",
         "previous_generation_id",
         "previous_checkpoint_sha256",
+        "commit_seq",
+        "commit_sha256",
     }
     if type(ptr) is not dict or set(ptr) != required:
         raise ValueError("pointer field set invalid")
@@ -614,14 +809,16 @@ def _parse_pointer_bytes(root: Path, raw: bytes, expected_role: str | None = Non
         raise ValueError("pointer generation_id/completed mismatch")
     _require_hex64(ptr.get("checkpoint_sha256"), "pointer.checkpoint_sha256")
     _require_hex64(ptr.get("manifest_sha256"), "pointer.manifest_sha256")
+    _require_hex64(ptr.get("commit_sha256"), "pointer.commit_sha256")
+    require_exact_int(ptr.get("commit_seq"), "pointer.commit_seq", minimum=1)
     if ptr.get("generation_dir") != f"generations/{gen_id}-{role}":
         raise ValueError("pointer.generation_dir mismatch")
     if ptr.get("checkpoint_relpath") != f"generations/{gen_id}-{role}/checkpoint.bin":
         raise ValueError("pointer.checkpoint_relpath mismatch")
     if ptr.get("manifest_relpath") != f"generations/{gen_id}-{role}/manifest.json":
         raise ValueError("pointer.manifest_relpath mismatch")
-    _safe_generation_relpath(root, ptr["checkpoint_relpath"], label="checkpoint_relpath")
-    _safe_generation_relpath(root, ptr["manifest_relpath"], label="manifest_relpath")
+    _safe_generation_relpath(root, ptr["checkpoint_relpath"], label="pointer.checkpoint_relpath")
+    _safe_generation_relpath(root, ptr["manifest_relpath"], label="pointer.manifest_relpath")
     prev_gen = ptr.get("previous_generation_id")
     prev_sha = ptr.get("previous_checkpoint_sha256")
     if (prev_gen is None) != (prev_sha is None):
@@ -630,24 +827,120 @@ def _parse_pointer_bytes(root: Path, raw: bytes, expected_role: str | None = Non
         parse_generation_id(prev_gen)
         _require_hex64(prev_sha, "pointer.previous_checkpoint_sha256")
     macro = ptr.get("macro")
-    if macro is not None and (type(macro) not in (int, float) or isinstance(macro, bool) or not math.isfinite(float(macro))):
-        raise ValueError("pointer.macro must be null or finite float")
+    if macro is not None:
+        _require_finite_number(macro, "pointer.macro")
     return ptr
 
 
-def resolve_pointer(root: Path, role: str) -> dict:
-    if not isinstance(root, Path):
-        root = Path(root)
-    if role not in {"BEST", "LAST"} or "_scored_event_pkg" in str(root):
-        raise ValueError("pointer role or root rejected")
-    pointer_path = root / f"CURRENT_{role}"
-    ptr_bytes = _read_bounded_bytes(pointer_path, max_bytes=MAX_POINTER_BYTES, label=f"CURRENT_{role}")
-    ptr = _parse_pointer_bytes(root, ptr_bytes, expected_role=role)
+def _validate_generation_record(root: Path, entry: object, expected_role: str) -> dict:
+    required = {
+        "generation_id",
+        "role",
+        "generation_dir",
+        "checkpoint_relpath",
+        "manifest_relpath",
+        "checkpoint_sha256",
+        "manifest_sha256",
+        "provenance_sha256",
+        "completed",
+        "macro",
+    }
+    if type(entry) is not dict or set(entry) != required:
+        raise ValueError("commit generation record field set invalid")
+    if entry.get("role") != expected_role:
+        raise ValueError(f"commit record role must be {expected_role}")
+    gen_id = entry.get("generation_id")
+    gen_step = parse_generation_id(gen_id)
+    completed = require_exact_int(entry.get("completed"), f"commit.{expected_role}.completed", minimum=0)
+    if completed != gen_step:
+        raise ValueError("commit generation_id/completed mismatch")
+    _require_hex64(entry.get("checkpoint_sha256"), f"commit.{expected_role}.checkpoint_sha256")
+    _require_hex64(entry.get("manifest_sha256"), f"commit.{expected_role}.manifest_sha256")
+    _require_hex64(entry.get("provenance_sha256"), f"commit.{expected_role}.provenance_sha256")
+    _require_finite_number(entry.get("macro"), f"commit.{expected_role}.macro")
+    if entry.get("generation_dir") != f"generations/{gen_id}-{expected_role}":
+        raise ValueError("commit record generation_dir mismatch")
+    if entry.get("checkpoint_relpath") != f"generations/{gen_id}-{expected_role}/checkpoint.bin":
+        raise ValueError("commit record checkpoint_relpath mismatch")
+    if entry.get("manifest_relpath") != f"generations/{gen_id}-{expected_role}/manifest.json":
+        raise ValueError("commit record manifest_relpath mismatch")
+    _safe_generation_relpath(root, entry["checkpoint_relpath"], label="commit.checkpoint_relpath")
+    _safe_generation_relpath(root, entry["manifest_relpath"], label="commit.manifest_relpath")
+    return entry
 
-    man_path = _safe_generation_relpath(root, ptr["manifest_relpath"], label="manifest_relpath")
-    man_bytes = _read_bounded_bytes(man_path, max_bytes=MAX_MANIFEST_BYTES, label="manifest.json")
-    if hashlib.sha256(man_bytes).hexdigest() != ptr["manifest_sha256"]:
-        raise ValueError("checkpoint manifest sha256 mismatch")
+
+def _parse_commit_bytes(root: Path, raw: bytes) -> dict:
+    commit = strict_json_loads(raw, max_bytes=MAX_COMMIT_BYTES)
+    required = {
+        "commit_schema",
+        "manifest_schema",
+        "pointer_schema",
+        "provenance_schema",
+        "commit_seq",
+        "effective_config_sha256",
+        "last",
+        "best",
+        "best_history",
+        "owner_trust_root_status",
+        "release_created",
+    }
+    if type(commit) is not dict or set(commit) != required:
+        raise ValueError("CURRENT_COMMIT field set invalid")
+    if commit.get("commit_schema") != COMMIT_SCHEMA_VERSION:
+        raise ValueError("CURRENT_COMMIT commit_schema mismatch")
+    if commit.get("manifest_schema") != MANIFEST_SCHEMA_VERSION:
+        raise ValueError("CURRENT_COMMIT manifest_schema mismatch")
+    if commit.get("pointer_schema") != POINTER_SCHEMA_VERSION:
+        raise ValueError("CURRENT_COMMIT pointer_schema mismatch")
+    if commit.get("provenance_schema") != PROVENANCE_SCHEMA_VERSION:
+        raise ValueError("CURRENT_COMMIT provenance_schema mismatch")
+    require_exact_int(commit.get("commit_seq"), "commit.commit_seq", minimum=1)
+    _require_hex64(commit.get("effective_config_sha256"), "commit.effective_config_sha256")
+    if commit.get("owner_trust_root_status") != OWNER_TRUST_ROOT_STATUS:
+        raise ValueError("CURRENT_COMMIT owner_trust_root_status mismatch")
+    if commit.get("release_created") is not False:
+        raise ValueError("CURRENT_COMMIT release_created must be false")
+
+    last_entry = _validate_generation_record(root, commit.get("last"), "LAST")
+    best_entry = _validate_generation_record(root, commit.get("best"), "BEST")
+    if best_entry["completed"] > last_entry["completed"]:
+        raise ValueError("CURRENT_COMMIT best step cannot exceed last step")
+
+    raw_history = commit.get("best_history")
+    if type(raw_history) is not list or not raw_history or len(raw_history) > MAX_BEST_HISTORY:
+        raise ValueError("CURRENT_COMMIT best_history invalid")
+    prev_step = -1
+    prev_macro: float | None = None
+    for item in raw_history:
+        rec = _validate_generation_record(root, item, "BEST")
+        step = rec["completed"]
+        macro = float(rec["macro"])
+        if step <= prev_step:
+            raise ValueError("CURRENT_COMMIT best_history steps must strictly increase")
+        if prev_macro is not None and not (macro < prev_macro):
+            raise ValueError("CURRENT_COMMIT best_history must strictly improve per earliest-tie rule")
+        prev_step = step
+        prev_macro = macro
+    if raw_history[-1] != best_entry:
+        raise ValueError("CURRENT_COMMIT best_history[-1] must match committed best")
+    return commit
+
+
+def _verify_materialized_record(
+    root: Path,
+    entry: dict,
+    role: str,
+    *,
+    expected_provenance: dict | None = None,
+) -> dict:
+    gen_dir = _safe_generation_relpath(root, entry["generation_dir"], label=f"{role}.generation_dir")
+    if not gen_dir.is_dir():
+        raise ValueError(f"{role} generation directory missing")
+    man_path = _safe_generation_relpath(root, entry["manifest_relpath"], label=f"{role}.manifest_relpath")
+    man_bytes = _read_bounded_bytes(man_path, max_bytes=MAX_MANIFEST_BYTES, label=f"{role}.manifest.json")
+    if hashlib.sha256(man_bytes).hexdigest() != entry["manifest_sha256"]:
+        raise ValueError(f"{role} manifest sha256 mismatch")
+
     manifest = strict_json_loads(man_bytes, max_bytes=MAX_MANIFEST_BYTES)
     required_man = {
         "manifest_schema",
@@ -663,42 +956,361 @@ def resolve_pointer(root: Path, role: str) -> dict:
         "provenance",
     }
     if type(manifest) is not dict or set(manifest) != required_man:
-        raise ValueError("checkpoint manifest field set invalid")
+        raise ValueError(f"{role} manifest field set invalid")
     if manifest.get("manifest_schema") != MANIFEST_SCHEMA_VERSION:
-        raise ValueError("checkpoint manifest schema mismatch")
+        raise ValueError(f"{role} manifest schema mismatch")
     if manifest.get("checkpoint_schema") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError("checkpoint manifest checkpoint_schema mismatch")
+        raise ValueError(f"{role} manifest checkpoint_schema mismatch")
     if manifest.get("provenance_schema") != PROVENANCE_SCHEMA_VERSION:
-        raise ValueError("checkpoint manifest provenance_schema mismatch")
-    if manifest.get("generation_id") != ptr["generation_id"] or manifest.get("role") != role:
-        raise ValueError("checkpoint manifest identity mismatch")
-    if manifest.get("completed") != ptr["completed"] or manifest.get("checkpoint_sha256") != ptr["checkpoint_sha256"]:
-        raise ValueError("checkpoint manifest digest/step mismatch")
+        raise ValueError(f"{role} manifest provenance_schema mismatch")
+    if manifest.get("generation_id") != entry["generation_id"] or manifest.get("role") != role:
+        raise ValueError(f"{role} manifest identity mismatch")
+    if manifest.get("completed") != entry["completed"] or manifest.get("checkpoint_sha256") != entry["checkpoint_sha256"]:
+        raise ValueError(f"{role} manifest digest/step mismatch")
+    if manifest.get("provenance_sha256") != entry["provenance_sha256"]:
+        raise ValueError(f"{role} manifest provenance_sha256 mismatch")
 
-    ckpt_path = _safe_generation_relpath(root, ptr["checkpoint_relpath"], label="checkpoint_relpath")
-    payload = _read_bounded_bytes(ckpt_path, max_bytes=MAX_CHECKPOINT_BYTES, label="checkpoint.bin")
+    ckpt_path = _safe_generation_relpath(root, entry["checkpoint_relpath"], label=f"{role}.checkpoint_relpath")
+    payload = _read_bounded_bytes(ckpt_path, max_bytes=MAX_CHECKPOINT_BYTES, label=f"{role}.checkpoint.bin")
     if len(payload) != manifest.get("checkpoint_bytes"):
-        raise ValueError("checkpoint byte count mismatch")
-    if hashlib.sha256(payload).hexdigest() != ptr["checkpoint_sha256"]:
-        raise ValueError("checkpoint sha256 mismatch")
+        raise ValueError(f"{role} checkpoint byte count mismatch")
+    if hashlib.sha256(payload).hexdigest() != entry["checkpoint_sha256"]:
+        raise ValueError(f"{role} checkpoint sha256 mismatch")
 
     decoded = unpack(payload)
     header = decoded["header"]
-    if header.get("completed") != ptr["completed"]:
-        raise ValueError("checkpoint header.completed disagrees with pointer")
+    if header.get("completed") != entry["completed"]:
+        raise ValueError(f"{role} header.completed disagrees with commit record")
     header_sha = hashlib.sha256(canonical_json_bytes(header, max_bytes=MAX_HEADER_BYTES)).hexdigest()
     if header_sha != manifest.get("header_sha256"):
-        raise ValueError("checkpoint header sha256 disagrees with manifest")
-    prov = verify_baseline_provenance(header)
-    if prov.get("generation_id") != ptr["generation_id"]:
-        raise ValueError("checkpoint header provenance disagrees with pointer generation_id")
-    if manifest.get("provenance") != prov:
-        raise ValueError("checkpoint manifest provenance disagrees with header provenance")
-    prov_sha = hashlib.sha256(canonical_json_bytes(prov, max_bytes=MAX_HEADER_BYTES)).hexdigest()
-    if prov_sha != manifest.get("provenance_sha256"):
-        raise ValueError("checkpoint provenance sha256 mismatch")
+        raise ValueError(f"{role} header sha256 disagrees with manifest")
 
-    return {"pointer": ptr, "manifest": manifest, "payload": payload, "decoded": decoded}
+    prov = (
+        verify_checkpoint_provenance(
+            header,
+            expected_provenance,
+            expected_generation_id=entry["generation_id"],
+        )
+        if expected_provenance is not None
+        else verify_baseline_provenance(header)
+    )
+    if prov.get("generation_id") != entry["generation_id"]:
+        raise ValueError(f"{role} provenance generation_id mismatch")
+    if manifest.get("provenance") != prov:
+        raise ValueError(f"{role} manifest provenance disagrees with header provenance")
+    prov_sha = hashlib.sha256(canonical_json_bytes(prov, max_bytes=MAX_HEADER_BYTES)).hexdigest()
+    if prov_sha != entry["provenance_sha256"]:
+        raise ValueError(f"{role} provenance sha256 mismatch")
+    macro_val = _require_finite_number(header.get("macro"), f"{role}.header.macro")
+    if macro_val != float(entry["macro"]):
+        raise ValueError(f"{role} header.macro disagrees with commit record")
+
+    return {"record": entry, "manifest": manifest, "payload": payload, "decoded": decoded, "provenance": prov}
+
+
+def _sync_derived_mirrors(root: Path, commit: dict, commit_sha256: str) -> None:
+    history = commit["best_history"]
+    prev_best_gen: str | None = history[-2]["generation_id"] if len(history) >= 2 else None
+    prev_best_sha: str | None = history[-2]["checkpoint_sha256"] if len(history) >= 2 else None
+    last_entry = commit["last"]
+    best_entry = commit["best"]
+
+    mirrors = (
+        ("LAST", last_entry, None, None),
+        ("BEST", best_entry, prev_best_gen, prev_best_sha),
+    )
+    for role, entry, prev_gen, prev_sha in mirrors:
+        pointer_name = f"CURRENT_{role}"
+        pointer_path = root / pointer_name
+        if role == "LAST" and pointer_path.exists():
+            try:
+                old_raw = _read_bounded_bytes(pointer_path, max_bytes=MAX_POINTER_BYTES, label=pointer_name)
+                old_ptr = _parse_pointer_bytes(root, old_raw, expected_role="LAST")
+                if old_ptr["generation_id"] != entry["generation_id"]:
+                    prev_gen = old_ptr["generation_id"]
+                    prev_sha = old_ptr["checkpoint_sha256"]
+                else:
+                    prev_gen = old_ptr["previous_generation_id"]
+                    prev_sha = old_ptr["previous_checkpoint_sha256"]
+            except ValueError:
+                prev_gen = None
+                prev_sha = None
+        ptr = {
+            "pointer_schema": POINTER_SCHEMA_VERSION,
+            "role": role,
+            "generation_id": entry["generation_id"],
+            "generation_dir": entry["generation_dir"],
+            "checkpoint_relpath": entry["checkpoint_relpath"],
+            "manifest_relpath": entry["manifest_relpath"],
+            "checkpoint_sha256": entry["checkpoint_sha256"],
+            "manifest_sha256": entry["manifest_sha256"],
+            "completed": entry["completed"],
+            "macro": entry["macro"],
+            "previous_generation_id": prev_gen,
+            "previous_checkpoint_sha256": prev_sha,
+            "commit_seq": commit["commit_seq"],
+            "commit_sha256": commit_sha256,
+        }
+        ptr_bytes = canonical_json_bytes(ptr, max_bytes=MAX_POINTER_BYTES)
+        partial = root / f"{pointer_name}.partial"
+        partial.write_bytes(ptr_bytes)
+        _fsync_file(partial)
+        if partial.read_bytes() != ptr_bytes:
+            raise ValueError(f"{pointer_name} staged readback mismatch")
+        os.replace(partial, pointer_path)
+        _fsync_dir(root)
+        if pointer_path.read_bytes() != ptr_bytes:
+            raise ValueError(f"{pointer_name} readback mismatch")
+
+
+def resolve_commit(root: Path, *, expected_provenance: dict | None = None) -> dict:
+    root = _reject_root_if_scored(root)
+    commit_path = root / "CURRENT_COMMIT"
+    commit_bytes = _read_bounded_bytes(commit_path, max_bytes=MAX_COMMIT_BYTES, label="CURRENT_COMMIT")
+    commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
+    commit = _parse_commit_bytes(root, commit_bytes)
+
+    last_verified = _verify_materialized_record(
+        root,
+        commit["last"],
+        "LAST",
+        expected_provenance=expected_provenance,
+    )
+    best_verified = _verify_materialized_record(
+        root,
+        commit["best"],
+        "BEST",
+        expected_provenance=expected_provenance,
+    )
+    if last_verified["provenance"]["effective_config_sha256"] != commit["effective_config_sha256"]:
+        raise ValueError("LAST effective_config_sha256 disagrees with CURRENT_COMMIT")
+    if best_verified["provenance"]["effective_config_sha256"] != commit["effective_config_sha256"]:
+        raise ValueError("BEST effective_config_sha256 disagrees with CURRENT_COMMIT")
+
+    last_header = last_verified["decoded"]["header"]
+    best_header = best_verified["decoded"]["header"]
+    if last_header.get("best_step") != commit["best"]["completed"]:
+        raise ValueError("LAST header.best_step disagrees with committed BEST")
+    if _require_finite_number(last_header.get("best_macro"), "last.best_macro") != float(commit["best"]["macro"]):
+        raise ValueError("LAST header.best_macro disagrees with committed BEST")
+    if best_header.get("best_step") != commit["best"]["completed"]:
+        raise ValueError("BEST header.best_step disagrees with committed BEST")
+    expected_hdr_history = [{"step": rec["completed"], "macro": rec["macro"]} for rec in commit["best_history"]]
+    if last_header.get("best_history") != expected_hdr_history:
+        raise ValueError("LAST header.best_history disagrees with committed best_history")
+
+    # Verify every historical BEST generation remains preserved on disk with matching bytes.
+    for hist_entry in commit["best_history"]:
+        _verify_materialized_record(
+            root,
+            hist_entry,
+            "BEST",
+            expected_provenance=expected_provenance,
+        )
+
+    return {
+        "commit": commit,
+        "commit_sha256": commit_sha256,
+        "last": last_verified,
+        "best": best_verified,
+    }
+
+
+def resolve_pointer(root: Path, role: str, *, expected_provenance: dict | None = None) -> dict:
+    if role not in {"BEST", "LAST"}:
+        raise ValueError("pointer role rejected")
+    resolved = resolve_commit(root, expected_provenance=expected_provenance)
+    chosen = resolved["best"] if role == "BEST" else resolved["last"]
+    return {
+        "commit": resolved["commit"],
+        "commit_sha256": resolved["commit_sha256"],
+        "pointer": chosen["record"],
+        "manifest": chosen["manifest"],
+        "payload": chosen["payload"],
+        "decoded": chosen["decoded"],
+        "provenance": chosen["provenance"],
+    }
+
+
+def _inventory_unreferenced_paths(root: Path, commit: dict | None) -> tuple[list[str], list[str]]:
+    referenced: set[str] = set()
+    if commit is not None:
+        referenced.add(Path(commit["last"]["generation_dir"]).name)
+        referenced.add(Path(commit["best"]["generation_dir"]).name)
+        for item in commit["best_history"]:
+            referenced.add(Path(item["generation_dir"]).name)
+    generations = root / "generations"
+    stage_root = root / "stage"
+    unreferenced = (
+        sorted(p.name for p in generations.iterdir() if p.name not in referenced)
+        if generations.is_dir()
+        else []
+    )
+    orphaned = sorted(p.name for p in stage_root.iterdir()) if stage_root.is_dir() else []
+    return unreferenced, orphaned
+
+
+def recover_commit_state(root: Path, *, expected_provenance: dict | None = None) -> dict:
+    root = _reject_root_if_scored(root)
+    with _single_writer_lock(root):
+        commit_path = root / "CURRENT_COMMIT"
+        if not commit_path.exists():
+            unreferenced, orphaned = _inventory_unreferenced_paths(root, None)
+            # Never guess or promote uncommitted generations when CURRENT_COMMIT does not exist.
+            return {
+                "committed": False,
+                "commit": None,
+                "commit_sha256": None,
+                "unreferenced_generations": unreferenced,
+                "orphaned_stages": orphaned,
+            }
+        resolved = resolve_commit(root, expected_provenance=expected_provenance)
+        _sync_derived_mirrors(root, resolved["commit"], resolved["commit_sha256"])
+        unreferenced, orphaned = _inventory_unreferenced_paths(root, resolved["commit"])
+        return {
+            "committed": True,
+            "commit": resolved["commit"],
+            "commit_sha256": resolved["commit_sha256"],
+            "unreferenced_generations": unreferenced,
+            "orphaned_stages": orphaned,
+        }
+
+
+def _build_generation_manifest(
+    generation_id: str,
+    role: str,
+    completed: int,
+    payload: bytes,
+    header: dict,
+    prov: dict,
+) -> tuple[dict, bytes, str, str]:
+    checkpoint_sha256 = hashlib.sha256(payload).hexdigest()
+    header_sha256 = hashlib.sha256(canonical_json_bytes(header, max_bytes=MAX_HEADER_BYTES)).hexdigest()
+    provenance_sha256 = hashlib.sha256(canonical_json_bytes(prov, max_bytes=MAX_HEADER_BYTES)).hexdigest()
+    manifest = {
+        "manifest_schema": MANIFEST_SCHEMA_VERSION,
+        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
+        "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "generation_id": generation_id,
+        "role": role,
+        "completed": completed,
+        "checkpoint_bytes": len(payload),
+        "checkpoint_sha256": checkpoint_sha256,
+        "header_sha256": header_sha256,
+        "provenance_sha256": provenance_sha256,
+        "provenance": prov,
+    }
+    manifest_bytes = canonical_json_bytes(manifest, max_bytes=MAX_MANIFEST_BYTES)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    return manifest, manifest_bytes, checkpoint_sha256, manifest_sha256
+
+
+def _materialize_generation(
+    root: Path,
+    generation_id: str,
+    role: str,
+    completed: int,
+    payload: bytes,
+    header: dict,
+    prov: dict,
+    *,
+    expected_provenance: dict,
+) -> dict:
+    generations = root / "generations"
+    stage_root = root / "stage"
+    generations.mkdir(parents=True, exist_ok=True)
+    stage_root.mkdir(parents=True, exist_ok=True)
+    _fsync_dir(root)
+    if generations.stat().st_dev != stage_root.stat().st_dev:
+        raise ValueError("stage and generations must be on the same filesystem")
+
+    manifest, manifest_bytes, checkpoint_sha256, manifest_sha256 = _build_generation_manifest(
+        generation_id, role, completed, payload, header, prov
+    )
+    final = generations / f"{generation_id}-{role}"
+    if final.exists():
+        # Idempotent recovery of post-rename unreferenced or retried generation: verify exact match; refuse conflicts.
+        if not final.is_dir():
+            raise ValueError("existing generation path is not a directory")
+        entries = sorted(p.name for p in final.iterdir())
+        if entries != ["checkpoint.bin", "manifest.json"]:
+            raise ValueError("conflicting files in existing generation directory")
+        existing_ckpt = _read_bounded_bytes(final / "checkpoint.bin", max_bytes=MAX_CHECKPOINT_BYTES, label="existing checkpoint")
+        existing_man = _read_bounded_bytes(final / "manifest.json", max_bytes=MAX_MANIFEST_BYTES, label="existing manifest")
+        if existing_ckpt != payload or existing_man != manifest_bytes:
+            raise ValueError("conflicting existing generation; immutable artifact refuses overwrite")
+        decoded_existing = unpack(existing_ckpt)
+        verify_checkpoint_provenance(
+            decoded_existing["header"],
+            expected_provenance,
+            expected_generation_id=generation_id,
+        )
+        return {
+            "status": "reused_verified",
+            "record": {
+                "generation_id": generation_id,
+                "role": role,
+                "generation_dir": f"generations/{generation_id}-{role}",
+                "checkpoint_relpath": f"generations/{generation_id}-{role}/checkpoint.bin",
+                "manifest_relpath": f"generations/{generation_id}-{role}/manifest.json",
+                "checkpoint_sha256": checkpoint_sha256,
+                "manifest_sha256": manifest_sha256,
+                "provenance_sha256": manifest["provenance_sha256"],
+                "completed": completed,
+                "macro": _require_finite_number(header.get("macro"), "header.macro"),
+            },
+        }
+
+    stage: Path | None = None
+    for seq in range(1, MAX_FAILURE_RECEIPTS + 1):
+        candidate = stage_root / f"{generation_id}-{role}.tmp-{seq:04d}"
+        if not candidate.exists():
+            stage = candidate
+            break
+    if stage is None:
+        raise ValueError("stage directory reached MAX_FAILURE_RECEIPTS")
+    stage.mkdir(parents=False, exist_ok=False)
+    _fsync_dir(stage_root)
+
+    target = stage / "checkpoint.bin"
+    target.write_bytes(payload)
+    _fsync_file(target)
+    man_stage = stage / "manifest.json"
+    man_stage.write_bytes(manifest_bytes)
+    _fsync_file(man_stage)
+    _fsync_dir(stage)
+
+    staged_readback = target.read_bytes()
+    if staged_readback != payload or hashlib.sha256(staged_readback).hexdigest() != checkpoint_sha256:
+        raise ValueError("staged readback mismatch")
+    if man_stage.read_bytes() != manifest_bytes:
+        raise ValueError("staged manifest readback mismatch")
+    unpack(staged_readback)
+
+    os.rename(stage, final)
+    _fsync_dir(generations)
+    _fsync_dir(stage_root)
+
+    if (final / "checkpoint.bin").read_bytes() != payload:
+        raise ValueError("checkpoint readback mismatch")
+    if (final / "manifest.json").read_bytes() != manifest_bytes:
+        raise ValueError("manifest readback mismatch")
+
+    return {
+        "status": "created",
+        "record": {
+            "generation_id": generation_id,
+            "role": role,
+            "generation_dir": f"generations/{generation_id}-{role}",
+            "checkpoint_relpath": f"generations/{generation_id}-{role}/checkpoint.bin",
+            "manifest_relpath": f"generations/{generation_id}-{role}/manifest.json",
+            "checkpoint_sha256": checkpoint_sha256,
+            "manifest_sha256": manifest_sha256,
+            "provenance_sha256": manifest["provenance_sha256"],
+            "completed": completed,
+            "macro": _require_finite_number(header.get("macro"), "header.macro"),
+        },
+    }
 
 
 def write_failure_receipt(
@@ -709,10 +1321,7 @@ def write_failure_receipt(
     generation_id: str | None = None,
     details: dict | None = None,
 ) -> dict:
-    if not isinstance(root, Path):
-        root = Path(root)
-    if "_scored_event_pkg" in str(root):
-        raise ValueError("failure receipt root rejected")
+    root = _reject_root_if_scored(root)
     if type(stage) is not str or not stage:
         raise ValueError("failure stage must be a non-empty string")
     if type(reason) is not str or not reason:
@@ -722,6 +1331,7 @@ def write_failure_receipt(
     if details is not None and type(details) is not dict:
         raise ValueError("failure details must be a dict or None")
 
+    # Never acquire .writer.lock here so failure paths under lock cannot deadlock.
     failures_dir = root / "failures"
     failures_dir.mkdir(parents=True, exist_ok=True)
     safe_stage = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stage)[:48] or "failure"
@@ -763,132 +1373,167 @@ def write_failure_receipt(
     }
 
 
-def publish(root: Path, generation_id: str, role: str, payload: bytes) -> dict:
-    if not isinstance(root, Path):
-        root = Path(root)
-    if role not in {"BEST", "LAST"} or "_scored_event_pkg" in str(root):
-        raise ValueError("checkpoint path rejected")
-
+def commit_event(
+    root: Path,
+    generation_id: str,
+    payload: bytes,
+    *,
+    is_new_best: bool,
+    expected_provenance: dict,
+) -> dict:
+    root = _reject_root_if_scored(root)
+    if type(is_new_best) is not bool:
+        raise ValueError("is_new_best must be an exact bool")
+    if type(expected_provenance) is not dict:
+        raise ValueError("expected_provenance must be a dict")
     gen_step = parse_generation_id(generation_id)
+
     decoded = unpack(payload)
     header = decoded["header"]
     if header.get("completed") != gen_step:
-        raise ValueError("publish generation_id does not match header.completed")
-    prov = verify_baseline_provenance(header)
-    if prov.get("generation_id") != generation_id:
-        raise ValueError("publish provenance.generation_id mismatch")
+        raise ValueError("commit generation_id does not match header.completed")
+    prov = verify_checkpoint_provenance(
+        header,
+        expected_provenance,
+        expected_generation_id=generation_id,
+    )
+    macro_val = _require_finite_number(header.get("macro"), "header.macro")
+    best_step = require_exact_int(header.get("best_step"), "header.best_step", minimum=0)
+    best_macro = _require_finite_number(header.get("best_macro"), "header.best_macro")
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
 
-    macro_val = header.get("macro")
-    if macro_val is not None and (
-        type(macro_val) not in (int, float) or isinstance(macro_val, bool) or not math.isfinite(float(macro_val))
-    ):
-        raise ValueError("publish header.macro must be null or finite numeric")
+    with _single_writer_lock(root):
+        commit_path = root / "CURRENT_COMMIT"
+        prev_commit: dict | None = None
+        if commit_path.exists():
+            prev_bytes = _read_bounded_bytes(commit_path, max_bytes=MAX_COMMIT_BYTES, label="CURRENT_COMMIT")
+            prev_commit = _parse_commit_bytes(root, prev_bytes)
+            if prev_commit["effective_config_sha256"] != prov["effective_config_sha256"]:
+                raise ValueError("CURRENT_COMMIT effective_config_sha256 mismatch")
 
-    generations = root / "generations"
-    stage_root = root / "stage"
-    generations.mkdir(parents=True, exist_ok=True)
-    stage_root.mkdir(parents=True, exist_ok=True)
-    _fsync_dir(root)
-    if generations.stat().st_dev != stage_root.stat().st_dev:
-        raise ValueError("stage and generations must be on the same filesystem")
+            if prev_commit["last"]["generation_id"] == generation_id:
+                prev_best_is_this = prev_commit["best"]["generation_id"] == generation_id
+                if (
+                    prev_commit["last"]["checkpoint_sha256"] != payload_sha256
+                    or prev_best_is_this != is_new_best
+                    or (is_new_best and prev_commit["best"]["checkpoint_sha256"] != payload_sha256)
+                ):
+                    raise ValueError("conflicting commit for already-committed generation")
+                last_mat = _materialize_generation(
+                    root, generation_id, "LAST", gen_step, payload, header, prov,
+                    expected_provenance=expected_provenance,
+                )
+                if is_new_best:
+                    _materialize_generation(
+                        root, generation_id, "BEST", gen_step, payload, header, prov,
+                        expected_provenance=expected_provenance,
+                    )
+                else:
+                    _verify_materialized_record(
+                        root, prev_commit["best"], "BEST", expected_provenance=expected_provenance
+                    )
+                prev_commit_sha = hashlib.sha256(prev_bytes).hexdigest()
+                commit_point_sha = prev_commit_sha
+                try:
+                    _sync_derived_mirrors(root, prev_commit, prev_commit_sha)
+                except Exception as exc:
+                    raise PostCommitError(
+                        f"post-commit mirror sync failure after durable commit {generation_id}: {exc}",
+                        generation_id=generation_id,
+                        commit_sha256=commit_point_sha,
+                    ) from exc
+                return {
+                    "status": "idempotent_reused",
+                    "commit_seq": prev_commit["commit_seq"],
+                    "commit_sha256": prev_commit_sha,
+                    "generation_id": generation_id,
+                    "last": last_mat["record"],
+                    "best": prev_commit["best"],
+                }
 
-    final = generations / f"{generation_id}-{role}"
-    if final.exists():
-        raise ValueError("generation already exists; immutable BEST/LAST refuses overwrite")
+            prev_completed = prev_commit["last"]["completed"]
+            if gen_step <= prev_completed:
+                raise ValueError("commit step must strictly advance past previous committed step")
+            expected_is_new_best = macro_val < float(prev_commit["best"]["macro"])
+            if is_new_best != expected_is_new_best:
+                raise ValueError("is_new_best disagrees with earliest-tie BEST comparator")
+            if is_new_best:
+                if best_step != gen_step or best_macro != macro_val:
+                    raise ValueError("header best disagrees with new BEST")
+            else:
+                if best_step != prev_commit["best"]["completed"] or best_macro != float(prev_commit["best"]["macro"]):
+                    raise ValueError("header best disagrees with preserved committed BEST")
+        else:
+            if not is_new_best or best_step != gen_step or best_macro != macro_val:
+                raise ValueError("initial commit must set header best to initial generation")
 
-    pointer_name = f"CURRENT_{role}"
-    pointer_path = root / pointer_name
-    prev_gen_id: str | None = None
-    prev_ckpt_sha256: str | None = None
-    if pointer_path.exists():
-        prev_bytes = _read_bounded_bytes(pointer_path, max_bytes=MAX_POINTER_BYTES, label=pointer_name)
-        prev_ptr = _parse_pointer_bytes(root, prev_bytes, expected_role=role)
-        prev_gen_id = prev_ptr["generation_id"]
-        prev_ckpt_sha256 = prev_ptr["checkpoint_sha256"]
+        last_mat = _materialize_generation(
+            root, generation_id, "LAST", gen_step, payload, header, prov,
+            expected_provenance=expected_provenance,
+        )
+        if is_new_best:
+            best_mat = _materialize_generation(
+                root, generation_id, "BEST", gen_step, payload, header, prov,
+                expected_provenance=expected_provenance,
+            )
+            best_record = best_mat["record"]
+            history = ([] if prev_commit is None else list(prev_commit["best_history"])) + [best_record]
+        else:
+            assert prev_commit is not None
+            best_verified = _verify_materialized_record(
+                root, prev_commit["best"], "BEST", expected_provenance=expected_provenance
+            )
+            best_record = best_verified["record"]
+            history = list(prev_commit["best_history"])
 
-    checkpoint_sha256 = hashlib.sha256(payload).hexdigest()
-    header_sha256 = hashlib.sha256(canonical_json_bytes(header, max_bytes=MAX_HEADER_BYTES)).hexdigest()
-    provenance_sha256 = hashlib.sha256(canonical_json_bytes(prov, max_bytes=MAX_HEADER_BYTES)).hexdigest()
-    manifest = {
-        "manifest_schema": MANIFEST_SCHEMA_VERSION,
-        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
-        "provenance_schema": PROVENANCE_SCHEMA_VERSION,
-        "generation_id": generation_id,
-        "role": role,
-        "completed": gen_step,
-        "checkpoint_bytes": len(payload),
-        "checkpoint_sha256": checkpoint_sha256,
-        "header_sha256": header_sha256,
-        "provenance_sha256": provenance_sha256,
-        "provenance": prov,
-    }
-    manifest_bytes = canonical_json_bytes(manifest, max_bytes=MAX_MANIFEST_BYTES)
-    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        if len(history) > MAX_BEST_HISTORY:
+            raise ValueError("best_history exceeds MAX_BEST_HISTORY")
+        expected_hdr_history = [{"step": rec["completed"], "macro": rec["macro"]} for rec in history]
+        if header.get("best_history") != expected_hdr_history:
+            raise ValueError("header.best_history disagrees with committed best_history")
 
-    stage: Path | None = None
-    for seq in range(1, MAX_FAILURE_RECEIPTS + 1):
-        candidate = stage_root / f"{generation_id}-{role}.tmp-{seq:04d}"
-        if not candidate.exists():
-            stage = candidate
-            break
-    if stage is None:
-        raise ValueError("stage directory reached MAX_FAILURE_RECEIPTS")
-    stage.mkdir(parents=False, exist_ok=False)
-    _fsync_dir(stage_root)
-    target = stage / "checkpoint.bin"
-    target.write_bytes(payload)
-    _fsync_file(target)
-    man_stage = stage / "manifest.json"
-    man_stage.write_bytes(manifest_bytes)
-    _fsync_file(man_stage)
-    _fsync_dir(stage)
+        next_seq = 1 if prev_commit is None else int(prev_commit["commit_seq"]) + 1
+        commit = {
+            "commit_schema": COMMIT_SCHEMA_VERSION,
+            "manifest_schema": MANIFEST_SCHEMA_VERSION,
+            "pointer_schema": POINTER_SCHEMA_VERSION,
+            "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+            "commit_seq": next_seq,
+            "effective_config_sha256": prov["effective_config_sha256"],
+            "last": last_mat["record"],
+            "best": best_record,
+            "best_history": history,
+            "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
+            "release_created": False,
+        }
+        commit_bytes = canonical_json_bytes(commit, max_bytes=MAX_COMMIT_BYTES)
+        commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
 
-    staged_readback = target.read_bytes()
-    if staged_readback != payload or hashlib.sha256(staged_readback).hexdigest() != checkpoint_sha256:
-        raise ValueError("staged readback mismatch")
-    if man_stage.read_bytes() != manifest_bytes:
-        raise ValueError("staged manifest readback mismatch")
-    unpack(staged_readback)
+        partial = root / "CURRENT_COMMIT.partial"
+        partial.write_bytes(commit_bytes)
+        _fsync_file(partial)
+        if partial.read_bytes() != commit_bytes:
+            raise ValueError("CURRENT_COMMIT staged readback mismatch")
 
-    os.rename(stage, final)
-    _fsync_dir(generations)
-    _fsync_dir(stage_root)
+        # Single atomic commit point across LAST + BEST.
+        os.replace(partial, commit_path)
+        try:
+            _fsync_dir(root)
+            if commit_path.read_bytes() != commit_bytes:
+                raise ValueError("CURRENT_COMMIT readback mismatch")
+            _sync_derived_mirrors(root, commit, commit_sha256)
+        except Exception as exc:
+            raise PostCommitError(
+                f"post-commit failure after durable CURRENT_COMMIT {generation_id}: {exc}",
+                generation_id=generation_id,
+                commit_sha256=commit_sha256,
+            ) from exc
 
-    if (final / "checkpoint.bin").read_bytes() != payload:
-        raise ValueError("checkpoint readback mismatch")
-    if (final / "manifest.json").read_bytes() != manifest_bytes:
-        raise ValueError("manifest readback mismatch")
-
-    ptr = {
-        "pointer_schema": POINTER_SCHEMA_VERSION,
-        "role": role,
-        "generation_id": generation_id,
-        "generation_dir": f"generations/{generation_id}-{role}",
-        "checkpoint_relpath": f"generations/{generation_id}-{role}/checkpoint.bin",
-        "manifest_relpath": f"generations/{generation_id}-{role}/manifest.json",
-        "checkpoint_sha256": checkpoint_sha256,
-        "manifest_sha256": manifest_sha256,
-        "completed": gen_step,
-        "macro": macro_val,
-        "previous_generation_id": prev_gen_id,
-        "previous_checkpoint_sha256": prev_ckpt_sha256,
-    }
-    ptr_bytes = canonical_json_bytes(ptr, max_bytes=MAX_POINTER_BYTES)
-    partial = root / f"{pointer_name}.partial"
-    partial.write_bytes(ptr_bytes)
-    _fsync_file(partial)
-    if partial.read_bytes() != ptr_bytes:
-        raise ValueError("pointer staged readback mismatch")
-    os.replace(partial, pointer_path)
-    _fsync_dir(root)
-    if pointer_path.read_bytes() != ptr_bytes:
-        raise ValueError("pointer readback mismatch")
-
-    return {
-        "generation_id": generation_id,
-        "role": role,
-        "checkpoint_sha256": checkpoint_sha256,
-        "manifest_sha256": manifest_sha256,
-        "pointer_sha256": hashlib.sha256(ptr_bytes).hexdigest(),
-        "previous_generation_id": prev_gen_id,
-    }
+        return {
+            "status": "committed",
+            "commit_seq": next_seq,
+            "commit_sha256": commit_sha256,
+            "generation_id": generation_id,
+            "last": last_mat["record"],
+            "best": best_record,
+        }
