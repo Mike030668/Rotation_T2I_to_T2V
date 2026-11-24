@@ -144,6 +144,6 @@ def require_records(records: list, completed: int) -> None:
                 raise ValueError("current or target label does not match the pinned source")
         if type(record["cursor_before"]) is not int or type(record["cursor_after"]) is not int:
             raise ValueError("cursor is not an int")
-        if record["cursor_before"] < 0 or record["cursor_after"] != record["cursor_before"] + len(record["videos"]):
+        if record["cursor_before"] < 0 or record["cursor_after"] > 400 or record["cursor_after"] != record["cursor_before"] + len(record["videos"]):
             raise ValueError("cursor step does not match the batch")
         replay_ordinals(record)
