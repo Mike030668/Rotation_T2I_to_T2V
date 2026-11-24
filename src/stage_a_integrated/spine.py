@@ -69,7 +69,8 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                 {
                     "completed": completed,
                     "epoch": epoch,
-                    "cursor": cursor,
+                    "cursor_before": cursor - int(config["batch"]),
+            "cursor": cursor,
                     "macro": value,
                     "best_step": None if best is None else best[0],
                     "best_macro": None if best is None else best[1],

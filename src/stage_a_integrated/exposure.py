@@ -101,6 +101,10 @@ def require_records(records: list, completed: int) -> None:
     if len(records) != completed:
         raise ValueError("exposure length does not match completed")
     for index, record in enumerate(records, start=1):
+        if type(record) is not dict:
+            raise ValueError("exposure record is not an object")
+        if type(record.get("videos")) is not list:
+            raise ValueError("exposure videos is not a list")
         if record.get("schema") != "exposure-v1" or record.get("completed") != index or record.get("provider") != "SYNTHETIC_APPARATUS":
             raise ValueError("exposure schema or step mismatch")
         for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon", "epoch", "cursor", "seed"):
