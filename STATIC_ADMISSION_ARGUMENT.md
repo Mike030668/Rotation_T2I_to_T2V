@@ -1,56 +1,131 @@
-# Static Admission & Pre-Mutation Argument (`STATIC_ADMISSION_ARGUMENT.md`)
+# Static Admission, Transaction, and Rollback Argument (`STATIC_ADMISSION_ARGUMENT.md`)
 
-Date: 2026-11-24
-Code Commit: `7ed83698014a01007baa480f173a482b69a5d9c7`
-Package: Stage A — Contract C1 (`C1-01`…`C1-06`)
-Boundary: `SOURCE_ONLY / NOT_RUN` (zero imports, compiles, tests, forward passes, optimizer steps, or checkpoint writes performed).
+**Branch:** `local/stage-a-git-first`  
+**C1 Accepted Baseline:** Doc commit `7bb1c73f0c4bd252aa9dd42d5604e69ed7fe3bb6` / Code commit `7ed83698014a01007baa480f173a482b69a5d9c7`  
+**C2 Code Commits:** `19e034d2a5ef07443f9a9626c127b97ef48d23e0` -> `6622078391736777edc62ea4a61d33c430bd3dc1`  
+**Execution Status:** `SOURCE_ONLY / NO_IMPORT / NO_COMPILE / NO_TEST / NO_EXECUTION`
 
-## 1. Call Graphs
+---
 
-### 1.1 Writer Call Graph (`run_synthetic`)
-1. `spine.run_synthetic` (`spine.py:72-211`) validates release scope/budget (`authorization.load` at `:73`), validates run config (`_validate_run_config` at `:40-69`), and verifies static pins (`verify_sampler_pin` at `plan.py:29-34`, `verify_train_ids_pin(train_ids())` at `plan.py:37-52`).
-2. If `config.get("resume_bytes")` is present (`:97`), invokes `resume(...)` (`:257-312`) before entering the loop.
-3. For each update while `completed < max_updates` (`:121`):
-   - **Pre-call cursor capture (`C1-03`):** `advance_window(epoch, cursor, batch_size)` (`plan.py:55-77`, called at `spine.py:122`) computes `(step_epoch, cursor_before, expected_cursor_after)` **without mutating** `epoch` or `cursor`. If `cursor + batch_size > 400`, `step_epoch = epoch + 1` and `cursor_before = 0`.
-   - **Deterministic batch selection (`C1-02`, `C1-04`):** `next_batch(seed, step_epoch, cursor_before, batch_size)` (`plan.py:91-117`, called at `spine.py:123`) calls `select_video_ids(...)` (verifying `SYNTHETIC_TRAIN_IDS_SHA256`), calls `verify_sampler_pin()` before lazy-importing `stage_a_sampler_v2.sample`, maps ordinals to labels, builds `synthetic_item`, and records provenance fields (`epoch`, `seed`, `source_id`, `source_sha256`, `sampler_sha256`).
-   - **Canonical pre-step receipt (`C1-06`):** `build_receipt_bytes(...)` (`exposure.py:314-324`, called at `spine.py:127`) calls `receipt(...)` (`exposure.py:257-311`), which validates every batch item (`require_item` at `:227-254`), hashes canonical body JSON (`receipt_body_digest` at `:182-183`), detaches via `strict_json_loads`, attaches `receipt_sha256`, and serializes compact sorted ASCII bytes (`canonical_json_bytes` at `:166-179`).
-   - **Pre-optimizer admission (`C1-01`..`C1-04`, `C1-06`):** `require_record(proposed_bytes, completed_next, ...)` (`exposure.py:475-526`, called at `spine.py:136`) parses via `strict_json_loads`, runs `validate_record_structure(...)` (`exposure.py:371-472`) including global video-order verification and one call to `replay_ordinals`, and asserts exact canonical byte identity. `spine.py:148-149` checks `record["videos"] == chosen`.
-   - **Optimizer step & post-step state commit:** `optimizer_step(model, batch, opt, clip)` (`spine.py:150`). Only after `step_inc == 1` succeeds do `completed`, `epoch`, `cursor`, `last_cursor_before`, `last_receipt_sha256`, and `exposure_frames` update (`spine.py:153-158`).
-   - **DEV checkpoint publication:** At `completed in dev_events` (`:159`), `exposure_journal_bytes = b"[" + b",".join(exposure_frames) + b"]"` reuses the exact pre-step frozen bytes (no dict re-serialization), `build_sampler_section_bytes(...)` (`exposure.py:613-654`) produces canonical `sampler-v2` bytes, and `pack` + `publish` write the payload (`spine.py:179-203`).
+## 1. Complete C1 + C2 Call Graphs
 
-### 1.2 Resume Call Graph (`resume`)
-1. `spine.resume(payload, model, opt, expected_config)` (`spine.py:257-312`) first validates `expected_config` is a dict with exact-int `seed` (`>=0`) and `batch` (`1..400`).
-2. Calls `decoded = unpack(payload)` (`checkpoints.py:28-46`, section SHA check) and `header = _admit(decoded)` (`spine.py:214-247`).
-3. **Full pre-mutation C1 admission (`C1-01`..`C1-06`):** Calls `reconcile_checkpoint_state(header, decoded["sampler"], decoded["exposure"], ...)` (`exposure.py:657-807`) **before** any call to `model.load_state_dict`, `opt.load_state_dict`, `random.setstate`, `numpy.random.set_state`, or `torch.set_rng_state` (`spine.py:291-297`):
-   - Verifies external expected source/sampler pins against `verify_sampler_pin()` and `verify_train_ids_pin(train_ids())` (`exposure.py:350-368`).
-   - Rejects legacy headers without `exposure_schema` or with `exposure_schema == "exposure-v1"` (`:678-686`).
-   - Validates exact types/ranges of header fields and exact match to `expected_config` + pinned source/sampler (`:688-723`).
-   - Parses `sampler_raw` via `strict_json_loads(max_bytes=4096)` (rejecting duplicate keys and `NaN`/`Infinity`), rejects legacy untyped sampler sections (`:730-731`), enforces `SAMPLER_V2_KEYS` and exact canonical byte equality (`:734-737`), checks exact field equality with `header` and external pins (`:739-778`).
-   - Calls `require_records(exposure_raw, h_completed, ...)` (`:529-610`), which parses `exposure_raw` via `strict_json_loads(max_bytes=16MiB)`, enforces `type is list` and `len == completed`, and **independently replays the entire journal `1..completed` from `(epoch=0, cursor=0)`** via `advance_window`, `validate_record_structure` (schema/types/bounds/labels/`receipt_sha256`/`select_video_ids`/`replay_ordinals`), and exact canonical journal byte equality (`:586-590`).
-   - Reconciles `final_state` (`completed`, `epoch`, `cursor`, `last_cursor_before`, `exposure_journal_sha256`, `last_receipt_sha256`) against BOTH `header` and `sampler` (`:792-800`).
-4. **Only after step 3 returns** does `resume` call `model.load_state_dict`, `opt.load_state_dict`, and RNG state setters (`spine.py:291-297`).
+### 1.1 Writer & Durable Publish Call Graph (`spine.py:run_synthetic:189-417`)
 
-## 2. Trust Boundary: Externally Authoritative vs Checkpoint-Internal Data
+```text
+run_synthetic(release_path, trust_anchor_path, expected, config)
+  ├─> authorization.load(release_path, trust_anchor_path, expected)            [spine.py:190] (C4 trust root remains PENDING_OWNER)
+  ├─> _validate_run_config(config)                                             [spine.py:66-104,193]
+  ├─> verify_sampler_pin() & verify_train_ids_pin(train_ids())                 [spine.py:196-197]
+  ├─> file_sha256(horizons_path, max_bytes=16777216)                           [spine.py:200; checkpoints.py:86-105]
+  ├─> _canonical_effective_config_bytes(...)                                   [spine.py:107-140,201-208]
+  ├─> build_expected_provenance(effective_config_bytes, horizons_path, None)   [spine.py:209-214; checkpoints.py:136-173]
+  ├─> [if resume_bytes or resume_role:] pre-construction preflight BEFORE model/opt init:
+  │     ├─ resolve_pointer(root, role) if resume_role                          [spine.py:233-235; checkpoints.py:638-694]
+  │     ├─ _preflight_and_reconcile(resume_payload, expected_resume_cfg)       [spine.py:143-186,241]
+  │     ├─ enforce completed <= max_updates                                    [spine.py:242-243]
+  │     └─ on any exception -> write_failure_receipt(root, "resume_preflight", ...) -> re-raise
+  ├─> model = model_cls(config_cls()); opt = torch.optim.AdamW(...)            [spine.py:256-258]
+  ├─> [if resume_payload is not None:] resume(..., failure_root=root)          [spine.py:270-286,500-584]
+  └─> while completed < max_updates:                                           [spine.py:288-409]
+        ├─ step_epoch, cursor_before, expected_cursor_after = advance_window(epoch, cursor, batch_size)
+        ├─ batch, cursor_after, chosen = next_batch(seed, step_epoch, cursor_before, batch_size)
+        ├─ proposed_bytes = build_receipt_bytes(...)                           [exposure-v2 canonical bytes]
+        ├─ record, frozen_bytes = require_record(proposed_bytes, ...)          [full C1 validation BEFORE optimizer_step]
+        ├─ step_inc = optimizer_step(model, batch, opt, clip)                  [trainer.py:9-24; forward_binding DEFERRED_TO_C3]
+        ├─ state advance & exposure_frames.append(frozen_bytes)
+        └─ if completed in dev_events:                                         [spine.py:326-409]
+              ├─ try: value = evaluate(model, items, keys)
+              │  except: write_failure_receipt(root, "dev_eval_failure", ...); raise
+              │  finally: model.train()                                        [guarantees train-mode restore]
+              ├─ if nonfinite/bool(value):
+              │     write_failure_receipt(root, "dev_nonfinite", ...); raise ValueError
+              ├─ update macros[completed], best, events
+              ├─ step_provenance = build_expected_provenance(..., generation_id=f"u{completed}")
+              ├─ payload = pack(header_with_prov_v1, _sections(...))           [stca-v2; checkpoints.py:261-297]
+              └─ try:
+                    publish(root, f"u{completed}", "LAST", payload)            [CURRENT_LAST]
+                    if best[0] == completed: publish(root, f"u{completed}", "BEST", payload)
+                 except: write_failure_receipt(root, "checkpoint_publish", ...); raise
+```
 
-| Surface | Authority Class | Source / Binding | Security Limit Under C1 |
+### 1.2 2-Phase All-State Resume & Rollback Call Graph (`spine.py:resume:500-584`)
+
+```text
+resume(payload, model, opt, expected_config, *, failure_root=None)
+  │
+  ├─ PHASE 0 — ENVELOPE & EXPOSURE PREFLIGHT (_preflight_and_reconcile, zero side effects)
+  │   ├─ checkpoints.unpack(payload)                                           [checkpoints.py:300-370]
+  │   ├─ spine._admit(decoded)                                                 [spine.py:420-453]
+  │   ├─ verify_checkpoint_provenance / verify_baseline_provenance             [checkpoints.py:176-258]
+  │   ├─ exposure.reconcile_checkpoint_state(...)                              [exposure.py:657-807]
+  │   ├─ validate_python_rng_bytes / validate_numpy_rng_bytes / validate_torch_rng_bytes [checkpoints.py:373-423]
+  │
+  ├─ PHASE 1 — ALL-STATE STAGING (pure local copies; zero mutation of live model/opt/RNGs)
+  │   ├─ staged_model = stage_model_state(decoded["model"], model)             [checkpoints.py:448-469]
+  │   ├─ staged_adamw = stage_adamw_state(decoded["adamw"], opt, completed=N)  [checkpoints.py:521-563]
+  │   ├─ staged_py_rng = stage_python_rng(decoded["python_rng"])               [checkpoints.py:426-427]
+  │   ├─ staged_np_rng = stage_numpy_rng(decoded["numpy_rng"])                 [checkpoints.py:430-434]
+  │   └─ staged_torch_rng = stage_torch_rng(decoded["torch_rng"])              [checkpoints.py:437-445; isolated Generator.set_state probe]
+  │       └─ ANY failure in Phase 0 or 1:
+  │             [if failure_root:] write_failure_receipt(..., "resume_stage", ...)
+  │             raise (live model, live opt, and global Python/NumPy/Torch RNGs are 100% untouched)
+  │
+  ├─ SNAPSHOT CAPTURE (detached tensor clones + optimizer deepcopy + RNG copies)
+  │   └─ snap_model, snap_adamw, snap_py_rng, snap_np_rng, snap_torch_rng      [spine.py:537-542]
+  │
+  └─ PHASE 2 — TRANSACTIONAL APPLY & ROLLBACK
+      ├─ model.load_state_dict(staged_model, strict=True)
+      ├─ opt.load_state_dict(staged_adamw)
+      ├─ random.setstate(staged_py_rng)
+      ├─ numpy.random.set_state(staged_np_rng)
+      ├─ torch.set_rng_state(staged_torch_rng)
+      └─ on ANY exception:
+            _rollback_live_state(...) restores all 5 live snapshots            [spine.py:470-497]
+            finally: [if failure_root:] write_failure_receipt(..., "resume_apply", ...)
+            re-raise original exception
+```
+
+### 1.3 Crash-Safe Generation Publish & Pointer Protocol (`checkpoints.py:publish:766-894`)
+
+1. Validate `role in {"BEST", "LAST"}`, reject `"_scored_event_pkg" in str(root)`, validate canonical `generation_id == f"u{step}"`.
+2. Verify `payload` via `unpack(payload)`, check `header["completed"] == step` and `verify_baseline_provenance(header)["generation_id"] == generation_id`.
+3. Create `generations/` and `stage/`, `_fsync_dir(root)`, verify `generations.stat().st_dev == stage_root.stat().st_dev` (same-filesystem guarantee).
+4. **Immutable generation enforcement:** if `generations / f"{generation_id}-{role}"` already exists, refuse overwrite (`ValueError`).
+5. Read existing `CURRENT_{role}` (`_parse_pointer_bytes`) if present to extract `previous_generation_id` and `previous_checkpoint_sha256` without mutating any prior generation directory.
+6. Build canonical `ckpt-manifest-v1` JSON binding `checkpoint_bytes`, `checkpoint_sha256`, `header_sha256`, `provenance_sha256`, and `provenance`.
+7. Allocate fresh crash-recovery-safe temporary directory `stage / f"{generation_id}-{role}.tmp-{seq:04d}"`, `_fsync_dir(stage_root)`, write `checkpoint.bin` (`_fsync_file`), write `manifest.json` (`_fsync_file`), `_fsync_dir(stage)`.
+8. **Pre-rename verification:** read back `checkpoint.bin` (exact bytes + SHA256), read back `manifest.json`, and run full `unpack(staged_readback)`.
+9. **Atomic publish:** `os.rename(stage, final)`, `_fsync_dir(generations)`, `_fsync_dir(stage_root)`.
+10. **Post-rename verification:** read back `(final / "checkpoint.bin")` and `(final / "manifest.json")` before touching any pointer.
+11. **Atomic pointer commit (`ptr-v1`):** write `root / f"CURRENT_{role}.partial"`, `_fsync_file`, read back, `os.replace(partial, root / f"CURRENT_{role}")`, `_fsync_dir(root)`, read back.
+
+---
+
+## 2. Trust Boundary: Externally Authoritative vs Checkpoint-Internal Data (C1 + C2)
+
+| Surface | Authority Class | Source / Binding | Security Limit Under C2 |
 |---|---|---|---|
-| `expected_seed`, `expected_batch` | **Externally supplied caller config** | Passed into `resume(..., expected_config)` and `reconcile_checkpoint_state(...)` | Must match signed/pinned effective config once Owner trust (C4) and header provenance (C2) are integrated. |
-| `SYNTHETIC_SOURCE_ID`, `SYNTHETIC_TRAIN_IDS_SHA256`, `PINNED_SYNTHETIC_LABELS`, `SAMPLER_SHA256` | **Code-pinned synthetic apparatus constants** | `plan.py:12-16`, `__init__.py:7`, verified dynamically against `stage_a_sampler_v2.py` bytes and `train_ids()` JSON SHA256 | Certifies the synthetic 400-ID apparatus only; does **not** certify historical 400-video split/tensors (`500_1` corpus). |
-| `header`, `sampler` (`sampler-v2`), `exposure` (`exposure-v2`) inside checkpoint bytes | **Untrusted serialized input until reconciled** | Validated structurally, canonically, and deterministically replayed from `(0, 0)` against the external pins above | Self-consistency among `header`, `sampler`, and `exposure` is necessary, **never sufficient** by itself: all three are compared against externally reconstructed `train_ids()`, `advance_window`, `select_video_ids`, and `stage_a_sampler_v2.sample`. |
-| Model weights, AdamW state, RNG state, `checkpoints.unpack` header JSON parsing | **Deferred to C2** | Loaded only after `reconcile_checkpoint_state` passes; `checkpoints.py` unchanged in C1 | Late corrupt RNG/AdamW mutation, `unpack` duplicate-key/offset checks, and directory-fsync durability remain open under C2. |
-| `model_kwargs` forwarded in `trainer.optimizer_step` | **Deferred to C3** | `exposure-v2` explicitly declares `"forward_binding": "DEFERRED_TO_C3"` | C1 canonicalizes and hashes exposure metadata; tensor content/shape/dtype binding at `model.forward` is NOT claimed in C1. |
-| Ed25519 release root, clock, nonce ledger | **Deferred to C4 (`PENDING_OWNER`)** | `authorization.py` unchanged in C1 | No execution release exists. |
+| `expected_seed`, `expected_batch`, `effective_config_sha256` | **Externally supplied caller config** | Validated in `_validate_run_config`, hashed via `_canonical_effective_config_bytes`, bound into `prov-v1` | Reconciles resumed checkpoints with effective config; full CLI config & Ed25519 root await **C4** (`PENDING_OWNER_C4`) |
+| `SYNTHETIC_SOURCE_ID`, `SYNTHETIC_TRAIN_IDS_SHA256`, `CANDIDATE_SHA256`, `LOSS_SHA256`, `HORIZONS_SHA256`, `SAMPLER_SHA256` | **Code-pinned synthetic constants** | Bound in `prov-v1` (`checkpoints.py:152-173`) and runtime `file_sha256(horizons_path)` / `verify_*_pin()` | Certifies the synthetic 400-ID apparatus only; does **not** certify `500_1` historical tensor ABI (`C3`) |
+| `header`, `sections`, `sampler`, `exposure`, `provenance` | **Untrusted serialized bytes until reconciled** | `unpack` (`stca-v2`) + `_admit` + `verify_checkpoint_provenance` (`prov-v1`) + `reconcile_checkpoint_state` (`sampler-v2`/`exposure-v2`) | Self-consistency inside checkpoint is necessary, never sufficient; all metadata checked against external pins and global replay before any state staging |
+| `model`, `adamw`, `python_rng`, `numpy_rng`, `torch_rng` bytes | **Untrusted serialized state until Phase 1 & Phase 2** | Pure structural validators + isolated Torch `Generator` probe + shape/dtype/finiteness checks + 5-way live snapshot rollback | Late corruption in `torch_rng` or `adamw` leaves `model`, `opt`, and all live RNGs untouched or rolled back, with `fail-receipt-v1` written |
+| `CURRENT_BEST`, `CURRENT_LAST`, `manifest.json`, `checkpoint.bin` on disk | **Untrusted durable artifacts until `resolve_pointer`** | Bounded read (`_read_bounded_bytes`), relative-path traversal guard (`_safe_generation_relpath`), manifest/payload SHA256 chain, `unpack`, `prov-v1` check | Prevents path escape, silent pointer/payload split, or partial file consumption |
+| `model_kwargs` forwarded in `trainer.optimizer_step` | **Deferred to C3** | `prov-v1` and `exposure-v2` explicitly pin `"forward_binding": "DEFERRED_TO_C3"` | Forward tensor content/shape/dtype digest binding is NOT claimed in C2 |
+| Ed25519 release root, clock, nonce ledger | **Deferred to C4 (`PENDING_OWNER`)** | `prov-v1` and `configs/stage_a_synthetic.json` pin `"owner_trust_root_status": "PENDING_OWNER_C4"`, `"release_created": false` | Zero Owner keys or execution releases exist or are generated |
 
-## 3. Static Counterexample Rejection Proofs
+---
 
-1. **Good per-video sample at wrong global cursor (e.g., Step 2 videos placed at Step 1):** `require_records` tracks independent `(cur_epoch=0, cur_cursor=0)` via `advance_window`. At `step_index=1`, `exp_before=0`, so `validate_record_structure` calls `select_video_ids(17, 0, 0, 4)` -> `["syn-0017".."syn-0020"]`. Any Step 2 video list `["syn-0021".."syn-0024"]` (even with genuine `stage_a_sampler_v2.sample` outputs) fails `exposure.py:468-469` (`"exposure videos do not match global sampler order"`).
-2. **Overflow `399 -> 403`:** `validate_record_structure` enforces `cursor_before <= 399`, `cursor_after <= 400`, `cursor_after == cursor_before + batch_size`, and exact match to `advance_window` (`exposure.py:435-440`). Both `cursor_after=403` and mismatched `cursor_before=399` against `exp_before` fail.
-3. **Bool / float / negative scalars (`True`, `2.0`, `-7`):** All numeric checks use `require_exact_int` (`type(value) is not int` at `plan.py:20`), never `isinstance` or `==` coercion. Checked on `completed`, `epoch`, `seed`, `batch_size`, `cursor_before`, `cursor_after`, `ids_frames`, `selected_ordinals`, `selected_labels`, `current_ordinal`, `target_ordinal`, `current`, `target`.
-4. **Malformed outer/nested containers (`records=None`, `records=[None]`, `videos=7`, `selected_ordinals=7`, `schema=[]`):** Type checks on outer `bytes`/`list` (`exposure.py:552-558`), record `dict` (`:398`), `type(schema) is str` (`:401`), all 9 columns `type(column) is list` and `len(column) == batch_val` (`:443-448`), and nested lists (`:199-210`) all execute **before** any `zip`, row indexing, `receipt_body_digest`, `select_video_ids`, or `replay_ordinals`.
-5. **Duplicate JSON keys / `NaN` / `Infinity`:** `strict_json_loads` (`exposure.py:138-163`) rejects all three via `object_pairs_hook=_reject_duplicate_pairs` and `parse_constant=_reject_nonfinite_constant` before any dict inspection.
-6. **Legacy `exposure-v1` & untyped `sampler`:** `validate_record_structure` checks `schema in LEGACY_REJECTED_SCHEMAS` at `:403-404` before checking `EXPOSURE_V2_KEYS`; `reconcile_checkpoint_state` rejects missing `header["exposure_schema"]` at `:678-679` and missing `sampler["schema"]` at `:730-731` before touching model/AdamW/RNG.
-7. **Forged target ordinal (`target_ordinal=3` when sampler yields `(0, 2, 4)`):** `replay_ordinals` (`exposure.py:327-347`) checks `sampled[-2] == current_ord`, `sampled[-1] == target_ord`, and `list(history[sampled[-2]]) == ordinals` after structural admission.
+## 3. Static Counterexample Rejection Matrix (C1 + C2 Summary)
 
-## 4. Non-Execution Assumptions
+1. **Envelope & Framing Corruption (`C2-NEG-01..04`):** Non-`STCA` magic, `header_len` < 2 or > `MAX_HEADER_BYTES`, duplicate JSON keys or `NaN` in header, missing `checkpoint_schema="stca-v2"`, overlapping/gapped section `offset`, section exceeding `SECTION_MAX_BYTES`, section/body SHA256 mismatch, or trailing bytes fail immediately in `unpack` before `_admit` or any Torch/NumPy load.
+2. **Pre-Construction & Late-Section Corruption (`C2-NEG-05..09`):** Valid exposure + corrupt `python_rng` / `numpy_rng` fails in `_preflight_and_reconcile` **before** `model_cls(config_cls())` advances Torch RNG. Corrupt `model` (bad key/shape/dtype/`NaN`), corrupt `adamw` (missing `exp_avg`/`exp_avg_sq`/`step` when `completed > 0`, `NaN` moments, unknown param id), or wrong `torch_rng` length/bytes fail in Phase 1 `resume` **before** touching live weights or live RNGs, leaving `resume_stage` failure receipt.
+3. **Mid-Apply Fault (`C2-NEG-09`):** Exception during `model.load_state_dict`, `opt.load_state_dict`, or `setstate` triggers `_rollback_live_state`, restoring all 5 snapshots identically and writing `resume_apply` receipt.
+4. **Provenance & Budget Tampering (`C2-NEG-10`):** Altered `seed`, `clip`, `dev_events`, `horizons_file`, `generation_id != f"u{completed}"`, `release_created=True`, or checkpoint `completed > max_updates` fails preflight before model creation.
+5. **Nonfinite DEV & Publish/Pointer Failure (`C2-NEG-11..14`):** Exception or `NaN`/`Inf` from `evaluate` always restores `model.train()` via `finally`, writes `dev_eval_failure`/`dev_nonfinite` receipt, and never modifies `macros`, `events`, `best`, `CURRENT_BEST`, or `CURRENT_LAST`. Re-publishing existing `u32-BEST`, failed staged readback, or tampered `CURRENT_BEST` pointer refuses mutation without corrupting prior `generations/u*-BEST`.
 
-All invariants above are established by static source inspection at commit `7ed83698014a01007baa480f173a482b69a5d9c7`. No Python interpreter execution, import, compilation, unit test, sampler call, forward pass, optimizer step, checkpoint write, or host readback was executed.
+---
+
+## 4. Non-Execution & Scope Ceiling Attestation
+
+1. Static proofs hold by direct code inspection under `SOURCE_ONLY`; **zero** Python imports, compiles, unit tests, model forwards, optimizer steps, or filesystem checkpoint writes were executed (`STC_STAGE_A_SINGLE_GIT_INTEGRATION_STATIC_REVIEW` remains `NOT PASSED`).
+2. `forward_binding="DEFERRED_TO_C3"`, `500_1` historical corpus remains `UNBOUND / NOT_AUTHORIZED`, and `owner_trust_root_status="PENDING_OWNER_C4"`.
