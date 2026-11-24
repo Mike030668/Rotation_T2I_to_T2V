@@ -1,4 +1,7 @@
 .kilo/
+.control/
+.tmp/
+.git-worktrees/
 __pycache__/
 *.pyc
 .venv/
