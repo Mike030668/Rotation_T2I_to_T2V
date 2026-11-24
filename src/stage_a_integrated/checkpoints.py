@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -1081,7 +1082,7 @@ def stage_model_state(raw: bytes, model) -> dict:
     if type(raw) is not bytes or len(raw) < 1 or len(raw) > MAX_MODEL_SECTION_BYTES:
         raise ValueError("model section size out of bounds")
     loaded = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
-    if type(loaded) is not dict:
+    if type(loaded) not in (dict, OrderedDict):
         raise ValueError("model checkpoint state must be a dict")
     expected_state = model.state_dict()
     if set(loaded.keys()) != set(expected_state.keys()):
