@@ -9,5 +9,13 @@
   "candidate_sha256": "43937fdda6c81a8af73d642f73a9dfc03fb077dafe8b24faac6daed029a881ef",
   "loss_sha256": "ce7ccc063c8e8e1a8e7654b90cd00c2dd8ab37bfe605f82fa6c01f95a4056f0e",
   "horizons_sha256": "b7ad9bb1979285043c62c0e174b7b6515daa843ad97131444928b9a02e1de412",
+  "sampler_sha256": "3dcdebeb24fca37a6b90cba32a5c0f7cf5a619e78534d668abb598cb508ed9a0",
+  "exposure_schema": "exposure-v2",
+  "sampler_schema": "sampler-v2",
+  "synthetic_source_id": "SYNTHETIC_APPARATUS_400_V1",
+  "synthetic_train_size": 400,
+  "synthetic_train_ids_sha256": "76f17184b06cb65936befc25f2661fd2907f4d464c2f88b2a67782452ae68684",
+  "synthetic_remainder_policy": "rollover_before_overflow",
+  "forward_binding": "DEFERRED_TO_C3",
   "release_created": false
 }
