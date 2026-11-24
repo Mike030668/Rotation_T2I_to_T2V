@@ -2101,12 +2101,20 @@ def commit_event(
                         release_audit=validated_audit,
                     )
                 else:
+                    prev_best_provenance = {
+                        **expected_provenance,
+                        "generation_id": prev_commit["best"]["generation_id"],
+                    }
                     _verify_materialized_record(
-                        root, prev_commit["best"], "BEST", expected_provenance=expected_provenance
+                        root, prev_commit["best"], "BEST", expected_provenance=prev_best_provenance
                     )
                 for hist_entry in prev_commit["best_history"]:
+                    hist_provenance = {
+                        **expected_provenance,
+                        "generation_id": hist_entry["generation_id"],
+                    }
                     hist_verified = _verify_materialized_record(
-                        root, hist_entry, "BEST", expected_provenance=expected_provenance
+                        root, hist_entry, "BEST", expected_provenance=hist_provenance
                     )
                     validate_event_and_best_history(
                         hist_verified["decoded"]["header"],
@@ -2172,8 +2180,12 @@ def commit_event(
             history = ([] if prev_commit is None else list(prev_commit["best_history"])) + [best_record]
         else:
             assert prev_commit is not None
+            prev_best_provenance = {
+                **expected_provenance,
+                "generation_id": prev_commit["best"]["generation_id"],
+            }
             best_verified = _verify_materialized_record(
-                root, prev_commit["best"], "BEST", expected_provenance=expected_provenance
+                root, prev_commit["best"], "BEST", expected_provenance=prev_best_provenance
             )
             best_record = best_verified["record"]
             history = list(prev_commit["best_history"])
