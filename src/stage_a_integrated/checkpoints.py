@@ -33,6 +33,10 @@ FAILURE_RECEIPT_SCHEMA_VERSION = "fail-receipt-v1"
 OWNER_TRUST_ROOT_STATUS = "PENDING_OWNER_C4"
 RNG_SCOPE = "cpu_only"
 
+COMMIT_STATE_PRE_COMMIT_FAILURE = "PRE_COMMIT_FAILURE"
+COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN = "COMMIT_VISIBLE_DURABILITY_UNKNOWN"
+COMMIT_STATE_DURABLE = "COMMIT_DURABLE"
+
 EXPECTED_ADAMW_LR = 1e-4
 EXPECTED_ADAMW_WEIGHT_DECAY = 1e-4
 EXPECTED_ADAMW_BETAS = (0.9, 0.999)
@@ -100,14 +104,38 @@ PROVENANCE_KEYS = frozenset(
 )
 
 
-class PostCommitError(RuntimeError):
-    """Raised when a failure occurs after CURRENT_COMMIT has been durably replaced."""
+class CommitDurabilityUnknownError(RuntimeError):
+    """Raised when CURRENT_COMMIT is visible via os.replace but directory/commit fsync failed."""
 
     def __init__(self, message: str, *, generation_id: str, commit_sha256: str) -> None:
         super().__init__(message)
         self.generation_id = generation_id
         self.commit_sha256 = commit_sha256
+        self.commit_state = COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN
+        self.commit_visible = True
+        self.commit_durable = False
+        self.durability_confirmed = False
+
+
+class PostCommitError(RuntimeError):
+    """Raised after CURRENT_COMMIT durability is confirmed via fsync, during readback or mirror sync."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        generation_id: str,
+        commit_sha256: str,
+        phase: str = "mirror_sync",
+    ) -> None:
+        super().__init__(message)
+        self.generation_id = generation_id
+        self.commit_sha256 = commit_sha256
+        self.phase = phase
+        self.commit_state = COMMIT_STATE_DURABLE
+        self.commit_visible = True
         self.commit_durable = True
+        self.durability_confirmed = True
 
 
 class FatalRollbackError(RuntimeError):
@@ -155,6 +183,93 @@ def parse_generation_id(generation_id: object) -> int:
     if generation_id != f"u{step}":
         raise ValueError("generation_id must not contain leading zeros")
     return step
+
+
+def validate_event_and_best_history(
+    header: dict,
+    *,
+    expected_dev_events: list[int] | None = None,
+) -> dict:
+    """Validate event schedule prefix, finite macros, and strict-improvement best_history."""
+    if type(header) is not dict:
+        raise ValueError("checkpoint header must be a dict")
+    completed = require_exact_int(header.get("completed"), "header.completed", minimum=0)
+    events = header.get("events")
+    macros = header.get("macros")
+    if type(events) is not list or type(macros) is not dict:
+        raise ValueError("checkpoint header missing events or macros")
+    if events != sorted(set(events)) or any(type(event) is not int or event < 1 for event in events):
+        raise ValueError("event journal is not a strictly increasing positive int sequence")
+    if any(event > completed for event in events):
+        raise ValueError("event is after completed step")
+    if any(type(step) is not str or not step.isdigit() or str(int(step)) != step for step in macros):
+        raise ValueError("macro keys are not canonical decimal strings")
+    if set(events) != {int(step) for step in macros}:
+        raise ValueError("macro keys do not match event ids")
+    for value in macros.values():
+        if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
+            raise ValueError("nonfinite restored macro")
+    numeric = {int(step): float(value) for step, value in macros.items()}
+
+    if expected_dev_events is not None:
+        if (
+            type(expected_dev_events) is not list
+            or any(type(event) is not int or event < 1 for event in expected_dev_events)
+            or expected_dev_events != sorted(set(expected_dev_events))
+        ):
+            raise ValueError("expected_dev_events must be a strictly increasing list of positive ints")
+        expected_prefix = [event for event in expected_dev_events if event <= completed]
+        if events != expected_prefix:
+            raise ValueError("checkpoint events do not match external dev_events prefix through completed")
+
+    best_step = header.get("best_step")
+    best_macro = header.get("best_macro")
+    macro = header.get("macro")
+    best_history = header.get("best_history")
+    if events and best_step is None:
+        raise ValueError("best is missing while events exist")
+    if not events:
+        if best_step is not None or best_macro is not None or macro is not None:
+            raise ValueError("best/macro exists while events are empty")
+        if type(best_history) is not list or best_history:
+            raise ValueError("best_history must be empty list while events are empty")
+        return header
+
+    if type(best_step) is not int or isinstance(best_step, bool):
+        raise ValueError("best step or macro has invalid type")
+    try:
+        best_macro_val = _require_finite_number(best_macro, "header.best_macro")
+    except ValueError as exc:
+        raise ValueError("best step or macro has invalid type") from exc
+    macro_val = _require_finite_number(macro, "header.macro")
+    if completed == events[-1] and macro_val != numeric[events[-1]]:
+        raise ValueError("header.macro disagrees with latest event in macros")
+
+    expected_best_history: list[dict] = []
+    running_best_macro: float | None = None
+    for step in events:
+        step_macro = numeric[step]
+        if running_best_macro is None or step_macro < running_best_macro:
+            expected_best_history.append({"step": step, "macro": step_macro})
+            running_best_macro = step_macro
+
+    if best_step != expected_best_history[-1]["step"] or best_macro_val != expected_best_history[-1]["macro"]:
+        raise ValueError("best is not the earliest finite minimum")
+    if type(best_history) is not list or not best_history or len(best_history) > len(events):
+        raise ValueError("best_history must be a non-empty bounded list when events exist")
+
+    normalized_history: list[dict] = []
+    for entry in best_history:
+        if type(entry) is not dict or set(entry.keys()) != {"step", "macro"}:
+            raise ValueError("best_history entry malformed")
+        h_step = entry["step"]
+        if type(h_step) is not int or isinstance(h_step, bool) or h_step not in numeric:
+            raise ValueError("best_history step invalid or not in events")
+        h_val = _require_finite_number(entry["macro"], "best_history.macro")
+        normalized_history.append({"step": h_step, "macro": h_val})
+    if normalized_history != expected_best_history:
+        raise ValueError("best_history does not match strict-improvement reconstruction from macros")
+    return header
 
 
 def file_sha256(path: Path, *, max_bytes: int = MAX_CHECKPOINT_BYTES) -> str:
@@ -1063,7 +1178,29 @@ def _sync_derived_mirrors(root: Path, commit: dict, commit_sha256: str) -> None:
             raise ValueError(f"{pointer_name} readback mismatch")
 
 
-def resolve_commit(root: Path, *, expected_provenance: dict | None = None) -> dict:
+def _fsync_committed_state(root: Path, commit: dict) -> None:
+    """Establish on-disk durability for CURRENT_COMMIT and all referenced generations."""
+    unique_records: dict[str, dict] = {}
+    for entry in (commit["last"], commit["best"], *commit["best_history"]):
+        unique_records[entry["generation_dir"]] = entry
+    for entry in unique_records.values():
+        gen_dir = _safe_generation_relpath(root, entry["generation_dir"], label="recovery.generation_dir")
+        ckpt_path = _safe_generation_relpath(root, entry["checkpoint_relpath"], label="recovery.checkpoint_relpath")
+        man_path = _safe_generation_relpath(root, entry["manifest_relpath"], label="recovery.manifest_relpath")
+        _fsync_file(ckpt_path)
+        _fsync_file(man_path)
+        _fsync_dir(gen_dir)
+    _fsync_dir(root / "generations")
+    _fsync_file(root / "CURRENT_COMMIT")
+    _fsync_dir(root)
+
+
+def resolve_commit(
+    root: Path,
+    *,
+    expected_provenance: dict | None = None,
+    expected_dev_events: list[int] | None = None,
+) -> dict:
     root = _reject_root_if_scored(root)
     commit_path = root / "CURRENT_COMMIT"
     commit_bytes = _read_bounded_bytes(commit_path, max_bytes=MAX_COMMIT_BYTES, label="CURRENT_COMMIT")
@@ -1089,23 +1226,32 @@ def resolve_commit(root: Path, *, expected_provenance: dict | None = None) -> di
 
     last_header = last_verified["decoded"]["header"]
     best_header = best_verified["decoded"]["header"]
+    validate_event_and_best_history(last_header, expected_dev_events=expected_dev_events)
+    validate_event_and_best_history(best_header, expected_dev_events=expected_dev_events)
     if last_header.get("best_step") != commit["best"]["completed"]:
         raise ValueError("LAST header.best_step disagrees with committed BEST")
     if _require_finite_number(last_header.get("best_macro"), "last.best_macro") != float(commit["best"]["macro"]):
         raise ValueError("LAST header.best_macro disagrees with committed BEST")
     if best_header.get("best_step") != commit["best"]["completed"]:
         raise ValueError("BEST header.best_step disagrees with committed BEST")
-    expected_hdr_history = [{"step": rec["completed"], "macro": rec["macro"]} for rec in commit["best_history"]]
-    if last_header.get("best_history") != expected_hdr_history:
+    expected_hdr_history = [{"step": rec["completed"], "macro": float(rec["macro"])} for rec in commit["best_history"]]
+    normalized_last_history = [
+        {"step": int(item["step"]), "macro": float(item["macro"])} for item in last_header["best_history"]
+    ]
+    if normalized_last_history != expected_hdr_history:
         raise ValueError("LAST header.best_history disagrees with committed best_history")
 
     # Verify every historical BEST generation remains preserved on disk with matching bytes.
     for hist_entry in commit["best_history"]:
-        _verify_materialized_record(
+        hist_verified = _verify_materialized_record(
             root,
             hist_entry,
             "BEST",
             expected_provenance=expected_provenance,
+        )
+        validate_event_and_best_history(
+            hist_verified["decoded"]["header"],
+            expected_dev_events=expected_dev_events,
         )
 
     return {
@@ -1116,10 +1262,20 @@ def resolve_commit(root: Path, *, expected_provenance: dict | None = None) -> di
     }
 
 
-def resolve_pointer(root: Path, role: str, *, expected_provenance: dict | None = None) -> dict:
+def resolve_pointer(
+    root: Path,
+    role: str,
+    *,
+    expected_provenance: dict | None = None,
+    expected_dev_events: list[int] | None = None,
+) -> dict:
     if role not in {"BEST", "LAST"}:
         raise ValueError("pointer role rejected")
-    resolved = resolve_commit(root, expected_provenance=expected_provenance)
+    resolved = resolve_commit(
+        root,
+        expected_provenance=expected_provenance,
+        expected_dev_events=expected_dev_events,
+    )
     chosen = resolved["best"] if role == "BEST" else resolved["last"]
     return {
         "commit": resolved["commit"],
@@ -1150,7 +1306,12 @@ def _inventory_unreferenced_paths(root: Path, commit: dict | None) -> tuple[list
     return unreferenced, orphaned
 
 
-def recover_commit_state(root: Path, *, expected_provenance: dict | None = None) -> dict:
+def recover_commit_state(
+    root: Path,
+    *,
+    expected_provenance: dict | None = None,
+    expected_dev_events: list[int] | None = None,
+) -> dict:
     root = _reject_root_if_scored(root)
     with _single_writer_lock(root):
         commit_path = root / "CURRENT_COMMIT"
@@ -1159,18 +1320,45 @@ def recover_commit_state(root: Path, *, expected_provenance: dict | None = None)
             # Never guess or promote uncommitted generations when CURRENT_COMMIT does not exist.
             return {
                 "committed": False,
+                "commit_state": COMMIT_STATE_PRE_COMMIT_FAILURE,
+                "commit_durable": False,
                 "commit": None,
                 "commit_sha256": None,
                 "unreferenced_generations": unreferenced,
                 "orphaned_stages": orphaned,
             }
-        resolved = resolve_commit(root, expected_provenance=expected_provenance)
-        _sync_derived_mirrors(root, resolved["commit"], resolved["commit_sha256"])
-        unreferenced, orphaned = _inventory_unreferenced_paths(root, resolved["commit"])
+        resolved = resolve_commit(
+            root,
+            expected_provenance=expected_provenance,
+            expected_dev_events=expected_dev_events,
+        )
+        commit_record = resolved["commit"]
+        commit_sha256 = resolved["commit_sha256"]
+        generation_id = commit_record["last"]["generation_id"]
+        try:
+            _fsync_committed_state(root, commit_record)
+        except Exception as exc:
+            raise CommitDurabilityUnknownError(
+                f"recovered CURRENT_COMMIT {generation_id} durability fsync failed: {exc}",
+                generation_id=generation_id,
+                commit_sha256=commit_sha256,
+            ) from exc
+        try:
+            _sync_derived_mirrors(root, commit_record, commit_sha256)
+        except Exception as exc:
+            raise PostCommitError(
+                f"post-commit mirror_sync failure after durable CURRENT_COMMIT {generation_id}: {exc}",
+                generation_id=generation_id,
+                commit_sha256=commit_sha256,
+                phase="mirror_sync",
+            ) from exc
+        unreferenced, orphaned = _inventory_unreferenced_paths(root, commit_record)
         return {
             "committed": True,
-            "commit": resolved["commit"],
-            "commit_sha256": resolved["commit_sha256"],
+            "commit_state": COMMIT_STATE_DURABLE,
+            "commit_durable": True,
+            "commit": commit_record,
+            "commit_sha256": commit_sha256,
             "unreferenced_generations": unreferenced,
             "orphaned_stages": orphaned,
         }
@@ -1245,6 +1433,10 @@ def _materialize_generation(
             expected_provenance,
             expected_generation_id=generation_id,
         )
+        _fsync_file(final / "checkpoint.bin")
+        _fsync_file(final / "manifest.json")
+        _fsync_dir(final)
+        _fsync_dir(generations)
         return {
             "status": "reused_verified",
             "record": {
@@ -1380,6 +1572,7 @@ def commit_event(
     *,
     is_new_best: bool,
     expected_provenance: dict,
+    expected_dev_events: list[int] | None = None,
 ) -> dict:
     root = _reject_root_if_scored(root)
     if type(is_new_best) is not bool:
@@ -1392,6 +1585,9 @@ def commit_event(
     header = decoded["header"]
     if header.get("completed") != gen_step:
         raise ValueError("commit generation_id does not match header.completed")
+    validate_event_and_best_history(header, expected_dev_events=expected_dev_events)
+    if not header["events"] or header["events"][-1] != gen_step:
+        raise ValueError("commit payload events must end at committed generation step")
     prov = verify_checkpoint_provenance(
         header,
         expected_provenance,
@@ -1432,18 +1628,36 @@ def commit_event(
                     _verify_materialized_record(
                         root, prev_commit["best"], "BEST", expected_provenance=expected_provenance
                     )
+                for hist_entry in prev_commit["best_history"]:
+                    hist_verified = _verify_materialized_record(
+                        root, hist_entry, "BEST", expected_provenance=expected_provenance
+                    )
+                    validate_event_and_best_history(
+                        hist_verified["decoded"]["header"],
+                        expected_dev_events=expected_dev_events,
+                    )
                 prev_commit_sha = hashlib.sha256(prev_bytes).hexdigest()
-                commit_point_sha = prev_commit_sha
+                try:
+                    _fsync_committed_state(root, prev_commit)
+                except Exception as exc:
+                    raise CommitDurabilityUnknownError(
+                        f"commit durability fsync failed on idempotent retry {generation_id}: {exc}",
+                        generation_id=generation_id,
+                        commit_sha256=prev_commit_sha,
+                    ) from exc
                 try:
                     _sync_derived_mirrors(root, prev_commit, prev_commit_sha)
                 except Exception as exc:
                     raise PostCommitError(
-                        f"post-commit mirror sync failure after durable commit {generation_id}: {exc}",
+                        f"post-commit mirror_sync failure after durable commit {generation_id}: {exc}",
                         generation_id=generation_id,
-                        commit_sha256=commit_point_sha,
+                        commit_sha256=prev_commit_sha,
+                        phase="mirror_sync",
                     ) from exc
                 return {
                     "status": "idempotent_reused",
+                    "commit_state": COMMIT_STATE_DURABLE,
+                    "commit_durable": True,
                     "commit_seq": prev_commit["commit_seq"],
                     "commit_sha256": prev_commit_sha,
                     "generation_id": generation_id,
@@ -1488,8 +1702,11 @@ def commit_event(
 
         if len(history) > MAX_BEST_HISTORY:
             raise ValueError("best_history exceeds MAX_BEST_HISTORY")
-        expected_hdr_history = [{"step": rec["completed"], "macro": rec["macro"]} for rec in history]
-        if header.get("best_history") != expected_hdr_history:
+        expected_hdr_history = [{"step": rec["completed"], "macro": float(rec["macro"])} for rec in history]
+        normalized_hdr_history = [
+            {"step": int(item["step"]), "macro": float(item["macro"])} for item in header["best_history"]
+        ]
+        if normalized_hdr_history != expected_hdr_history:
             raise ValueError("header.best_history disagrees with committed best_history")
 
         next_seq = 1 if prev_commit is None else int(prev_commit["commit_seq"]) + 1
@@ -1515,22 +1732,35 @@ def commit_event(
         if partial.read_bytes() != commit_bytes:
             raise ValueError("CURRENT_COMMIT staged readback mismatch")
 
-        # Single atomic commit point across LAST + BEST.
+        # Single atomic visibility point across LAST + BEST; directory fsync establishes durability.
         os.replace(partial, commit_path)
         try:
             _fsync_dir(root)
-            if commit_path.read_bytes() != commit_bytes:
-                raise ValueError("CURRENT_COMMIT readback mismatch")
-            _sync_derived_mirrors(root, commit, commit_sha256)
         except Exception as exc:
-            raise PostCommitError(
-                f"post-commit failure after durable CURRENT_COMMIT {generation_id}: {exc}",
+            raise CommitDurabilityUnknownError(
+                f"CURRENT_COMMIT visible at {generation_id} but root directory fsync failed (durability unknown): {exc}",
                 generation_id=generation_id,
                 commit_sha256=commit_sha256,
             ) from exc
 
+        post_phase = "commit_readback"
+        try:
+            if commit_path.read_bytes() != commit_bytes:
+                raise ValueError("CURRENT_COMMIT readback mismatch")
+            post_phase = "mirror_sync"
+            _sync_derived_mirrors(root, commit, commit_sha256)
+        except Exception as exc:
+            raise PostCommitError(
+                f"post-commit {post_phase} failure after durable CURRENT_COMMIT {generation_id}: {exc}",
+                generation_id=generation_id,
+                commit_sha256=commit_sha256,
+                phase=post_phase,
+            ) from exc
+
         return {
             "status": "committed",
+            "commit_state": COMMIT_STATE_DURABLE,
+            "commit_durable": True,
             "commit_seq": next_seq,
             "commit_sha256": commit_sha256,
             "generation_id": generation_id,

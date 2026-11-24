@@ -11,6 +11,9 @@ from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import (
     CHECKPOINT_SCHEMA_VERSION,
     COMMIT_SCHEMA_VERSION,
+    COMMIT_STATE_DURABLE,
+    COMMIT_STATE_PRE_COMMIT_FAILURE,
+    COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
     EXPECTED_ADAMW_AMSGRAD,
     EXPECTED_ADAMW_BETAS,
     EXPECTED_ADAMW_EPS,
@@ -22,6 +25,7 @@ from .checkpoints import (
     POINTER_SCHEMA_VERSION,
     PROVENANCE_SCHEMA_VERSION,
     RNG_SCOPE,
+    CommitDurabilityUnknownError,
     FatalRollbackError,
     PostCommitError,
     build_expected_provenance,
@@ -39,6 +43,7 @@ from .checkpoints import (
     stage_python_rng,
     stage_torch_rng,
     unpack,
+    validate_event_and_best_history,
     validate_numpy_rng_bytes,
     validate_python_rng_bytes,
     validate_torch_rng_bytes,
@@ -80,6 +85,26 @@ def _require_finite_config_number(value: object, name: str) -> float:
     return float(value)
 
 
+def _safe_write_failure_receipt(
+    root: Path,
+    stage: str,
+    reason: str,
+    *,
+    generation_id: str | None = None,
+    details: dict | None = None,
+) -> dict | None:
+    try:
+        return write_failure_receipt(
+            root,
+            stage,
+            reason,
+            generation_id=generation_id,
+            details=details,
+        )
+    except Exception:
+        return None
+
+
 def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]:
     if type(config) is not dict:
         raise ValueError("config must be a dict")
@@ -87,8 +112,12 @@ def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]
     batch_size = require_exact_int(config.get("batch"), "config.batch", minimum=1, maximum=SYNTHETIC_TRAIN_SIZE)
     seed = require_exact_int(config.get("seed"), "config.seed", minimum=0, maximum=MAX_SEED)
     raw_events = config.get("dev_events")
-    if type(raw_events) is not list or any(type(event) is not int or event < 1 for event in raw_events):
-        raise ValueError("config.dev_events must be a list of positive exact ints")
+    if (
+        type(raw_events) is not list
+        or any(type(event) is not int or event < 1 for event in raw_events)
+        or raw_events != sorted(set(raw_events))
+    ):
+        raise ValueError("config.dev_events must be a strictly increasing list of positive exact ints")
     dev_events = list(raw_events)
     raw_clip = config.get("clip")
     if (
@@ -211,9 +240,12 @@ def _preflight_and_reconcile(payload: bytes, expected_config: dict) -> dict:
     expected_prov = expected_config.get("expected_provenance")
     if type(expected_prov) is not dict:
         raise ValueError("expected_config must supply external expected_provenance")
+    expected_dev_events = expected_config.get("dev_events")
+    if expected_dev_events is None:
+        raise ValueError("expected_config must supply external dev_events")
 
     decoded = unpack(payload)
-    header = _admit(decoded)
+    header = _admit(decoded, expected_dev_events)
     provenance = verify_checkpoint_provenance(header, expected_prov)
     reconciled = reconcile_checkpoint_state(
         header,
@@ -281,35 +313,125 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         "source_sha256": source_digest,
         "sampler_sha256": sampler_digest,
         "expected_provenance": base_provenance,
+        "dev_events": dev_events,
     }
     if has_resume_bytes or has_resume_role:
         try:
             if has_resume_role:
                 role = config["resume_role"]
-                recover_commit_state(root, expected_provenance=base_provenance)
-                resolved = resolve_pointer(root, role, expected_provenance=base_provenance)
+                if role == "BEST":
+                    raise ValueError(
+                        "BEST is a read-only selection/evaluation artifact; canonical continuation requires resume_role='LAST'"
+                    )
+                if role != "LAST":
+                    raise ValueError("resume_role must be 'LAST' for canonical continuation")
+                recovery = recover_commit_state(
+                    root,
+                    expected_provenance=base_provenance,
+                    expected_dev_events=dev_events,
+                )
+                if not recovery["committed"]:
+                    raise ValueError("cannot resume LAST from an uncommitted root")
+                resolved = resolve_pointer(
+                    root,
+                    "LAST",
+                    expected_provenance=base_provenance,
+                    expected_dev_events=dev_events,
+                )
                 resume_payload = resolved["payload"]
             else:
                 raw_resume = config["resume_bytes"]
                 if type(raw_resume) is not bytes:
                     raise ValueError("config.resume_bytes must be bytes")
+                recovery = recover_commit_state(
+                    root,
+                    expected_provenance=base_provenance,
+                    expected_dev_events=dev_events,
+                )
+                if not recovery["committed"]:
+                    raise ValueError(
+                        "raw resume_bytes is rejected for canonical continuation in an uncommitted root; "
+                        "use spine.resume() for isolated non-publishing staging"
+                    )
+                resolved = resolve_pointer(
+                    root,
+                    "LAST",
+                    expected_provenance=base_provenance,
+                    expected_dev_events=dev_events,
+                )
+                if (
+                    hashlib.sha256(raw_resume).hexdigest() != resolved["pointer"]["checkpoint_sha256"]
+                    or raw_resume != resolved["payload"]
+                ):
+                    raise ValueError("resume_bytes does not match authoritative committed LAST")
                 resume_payload = raw_resume
             preflight = _preflight_and_reconcile(resume_payload, expected_resume_cfg)
             if int(preflight["reconciled"]["final_state"]["completed"]) > max_updates:
                 raise ValueError("checkpoint completed step exceeds config.max_updates")
+        except CommitDurabilityUnknownError as exc:
+            _safe_write_failure_receipt(
+                root,
+                "commit_durability_unknown",
+                str(exc),
+                generation_id=exc.generation_id,
+                details={
+                    "phase": "resume_preflight",
+                    "commit_state": COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
+                    "commit_visible": True,
+                    "commit_durable": False,
+                    "commit_sha256": exc.commit_sha256,
+                    "must_fail_stop": True,
+                },
+            )
+            raise
+        except PostCommitError as exc:
+            _safe_write_failure_receipt(
+                root,
+                "post_commit_failure",
+                str(exc),
+                generation_id=exc.generation_id,
+                details={
+                    "phase": "resume_preflight",
+                    "commit_state": COMMIT_STATE_DURABLE,
+                    "commit_visible": True,
+                    "commit_durable": True,
+                    "post_commit_phase": exc.phase,
+                    "commit_sha256": exc.commit_sha256,
+                },
+            )
+            raise
         except Exception as exc:
             raw_role = config.get("resume_role")
-            write_failure_receipt(
+            _safe_write_failure_receipt(
                 root,
                 "resume_preflight",
                 str(exc),
                 details={"resume_role": raw_role if type(raw_role) in (str, type(None)) else repr(raw_role)},
             )
             raise
+    elif (root / "CURRENT_COMMIT").exists():
+        _safe_write_failure_receipt(
+            root,
+            "resume_preflight",
+            "cannot start unresumed training in an already-committed root; specify resume_role='LAST'",
+            details={"resume_role": None},
+        )
+        raise ValueError("cannot start unresumed training in an already-committed root; specify resume_role='LAST'")
 
     import torch
 
-    caller_rng_snapshot = capture_cpu_rng_snapshot() if resume_payload is not None else None
+    caller_rng_snapshot: tuple | None = None
+    if resume_payload is not None:
+        try:
+            caller_rng_snapshot = capture_cpu_rng_snapshot()
+        except Exception as exc:
+            _safe_write_failure_receipt(
+                root,
+                "resume_snapshot",
+                str(exc),
+                details={"phase": "caller_rng_snapshot", "rollback_attempted": False, "fail_stop": True},
+            )
+            raise
     try:
         model_cls, config_cls = load_class()
         model = model_cls(config_cls())
@@ -327,18 +449,28 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         if caller_rng_snapshot is not None:
             rb_errors = restore_cpu_rng_snapshot(caller_rng_snapshot)
             if rb_errors:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     root,
                     "fatal_rollback",
                     "RNG rollback failed after pre-resume setup failure",
-                    details={"original_error": str(exc), "rollback_errors": rb_errors, "fatal": True},
+                    details={
+                        "original_error": str(exc),
+                        "rollback_errors": rb_errors,
+                        "fatal": True,
+                        "must_terminate_process": True,
+                    },
                 )
                 raise FatalRollbackError(
                     "fatal pre-resume RNG rollback failure",
                     original_error=str(exc),
                     rollback_errors=rb_errors,
                 ) from exc
-            write_failure_receipt(root, "resume_stage", str(exc), details={"phase": "pre_resume_setup"})
+            _safe_write_failure_receipt(
+                root,
+                "resume_stage",
+                str(exc),
+                details={"phase": "pre_resume_setup", "rollback_succeeded": True, "fail_stop": True},
+            )
         raise
 
     completed = 0
@@ -415,7 +547,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             try:
                 value = evaluate(model, items, keys)
             except Exception as exc:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     root,
                     "dev_eval_failure",
                     str(exc),
@@ -426,7 +558,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             finally:
                 model.train()
             if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     root,
                     "dev_nonfinite",
                     f"nonfinite DEV metric at {generation_id}",
@@ -486,33 +618,59 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                 _sections(model, opt, sampler_bytes, exposure_journal_bytes),
             )
             try:
+                _admit(unpack(payload), dev_events)
                 commit_event(
                     root,
                     generation_id,
                     payload,
                     is_new_best=is_new_best,
                     expected_provenance=step_provenance,
+                    expected_dev_events=dev_events,
                 )
+            except CommitDurabilityUnknownError as exc:
+                _safe_write_failure_receipt(
+                    root,
+                    "commit_durability_unknown",
+                    str(exc),
+                    generation_id=generation_id,
+                    details={
+                        "completed": completed,
+                        "commit_state": COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
+                        "commit_visible": True,
+                        "commit_durable": False,
+                        "commit_sha256": exc.commit_sha256,
+                        "must_fail_stop": True,
+                    },
+                )
+                raise
             except PostCommitError as exc:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     root,
                     "post_commit_failure",
                     str(exc),
                     generation_id=generation_id,
                     details={
                         "completed": completed,
+                        "commit_state": COMMIT_STATE_DURABLE,
+                        "commit_visible": True,
                         "commit_durable": True,
+                        "post_commit_phase": exc.phase,
                         "commit_sha256": exc.commit_sha256,
                     },
                 )
                 raise
             except Exception as exc:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     root,
                     "checkpoint_publish",
                     str(exc),
                     generation_id=generation_id,
-                    details={"completed": completed, "commit_durable": False},
+                    details={
+                        "completed": completed,
+                        "commit_state": COMMIT_STATE_PRE_COMMIT_FAILURE,
+                        "commit_visible": False,
+                        "commit_durable": False,
+                    },
                 )
                 raise
             macros = next_macros
@@ -530,83 +688,15 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     }
 
 
-def _admit(decoded: dict) -> dict:
+def _admit(decoded: dict, expected_dev_events: list[int] | None = None) -> dict:
     if type(decoded) is not dict or type(decoded.get("header")) is not dict:
         raise ValueError("checkpoint payload missing header")
-    header = decoded["header"]
-    events = header.get("events")
-    macros = header.get("macros")
-    if type(events) is not list or type(macros) is not dict:
-        raise ValueError("checkpoint header missing events or macros")
-    if events != sorted(set(events)) or any(type(event) is not int or event < 1 for event in events):
-        raise ValueError("event journal is not a strictly increasing positive int sequence")
-    if any(type(step) is not str or not step.isdigit() or str(int(step)) != step for step in macros):
-        raise ValueError("macro keys are not canonical decimal strings")
-    if set(events) != {int(step) for step in macros}:
-        raise ValueError("macro keys do not match event ids")
-    for value in macros.values():
-        if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
-            raise ValueError("nonfinite restored macro")
-    numeric = {int(step): float(value) for step, value in macros.items()}
-    completed = header.get("completed")
-    if type(completed) is not int or isinstance(completed, bool) or completed < 0 or any(event > completed for event in events):
-        raise ValueError("event is after completed step")
-
-    best_step = header.get("best_step")
-    best_macro = header.get("best_macro")
-    macro = header.get("macro")
-    best_history = header.get("best_history")
-    if events and best_step is None:
-        raise ValueError("best is missing while events exist")
-    if not events:
-        if best_step is not None or best_macro is not None or macro is not None:
-            raise ValueError("best/macro exists while events are empty")
-        if type(best_history) is not list or best_history:
-            raise ValueError("best_history must be empty list while events are empty")
-    else:
-        if (
-            type(best_step) is not int
-            or isinstance(best_step, bool)
-            or type(best_macro) not in (int, float)
-            or isinstance(best_macro, bool)
-            or not math.isfinite(float(best_macro))
-        ):
-            raise ValueError("best step or macro has invalid type")
-        if type(macro) not in (int, float) or isinstance(macro, bool) or not math.isfinite(float(macro)):
-            raise ValueError("header.macro has invalid type or is nonfinite")
-        if completed == events[-1] and float(macro) != numeric[events[-1]]:
-            raise ValueError("header.macro disagrees with latest event in macros")
-        earliest = min(events, key=lambda step: (numeric[step], step))
-        if best_step != earliest or float(best_macro) != numeric[earliest]:
-            raise ValueError("best is not the earliest finite minimum")
-        if type(best_history) is not list or not best_history or len(best_history) > len(events):
-            raise ValueError("best_history must be a non-empty bounded list when events exist")
-        prev_hist_step = -1
-        prev_hist_macro: float | None = None
-        for entry in best_history:
-            if type(entry) is not dict or set(entry.keys()) != {"step", "macro"}:
-                raise ValueError("best_history entry malformed")
-            h_step = entry["step"]
-            h_macro = entry["macro"]
-            if (
-                type(h_step) is not int
-                or isinstance(h_step, bool)
-                or h_step not in numeric
-                or h_step <= prev_hist_step
-            ):
-                raise ValueError("best_history step invalid or not strictly increasing")
-            if type(h_macro) not in (int, float) or isinstance(h_macro, bool) or not math.isfinite(float(h_macro)):
-                raise ValueError("best_history macro nonfinite")
-            h_val = float(h_macro)
-            if h_val != numeric[h_step]:
-                raise ValueError("best_history macro disagrees with macros table")
-            if prev_hist_macro is not None and not (h_val < prev_hist_macro):
-                raise ValueError("best_history must strictly decrease per earliest-tie rule")
-            prev_hist_step = h_step
-            prev_hist_macro = h_val
-        if best_history[-1]["step"] != best_step or float(best_history[-1]["macro"]) != float(best_macro):
-            raise ValueError("best_history[-1] disagrees with best_step/best_macro")
-    return header
+    if expected_dev_events is None:
+        raise ValueError("_admit requires external expected_dev_events")
+    return validate_event_and_best_history(
+        decoded["header"],
+        expected_dev_events=expected_dev_events,
+    )
 
 
 def _python_state() -> list:
@@ -657,10 +747,23 @@ def resume(
     import numpy
     import torch
 
-    entry_rng_snapshot = capture_cpu_rng_snapshot()
-    restore_rng = caller_rng_snapshot if caller_rng_snapshot is not None else entry_rng_snapshot
+    if caller_rng_snapshot is not None:
+        restore_rng = caller_rng_snapshot
+    else:
+        try:
+            restore_rng = capture_cpu_rng_snapshot()
+        except Exception as exc:
+            if failure_root is not None:
+                _safe_write_failure_receipt(
+                    failure_root,
+                    "resume_snapshot",
+                    str(exc),
+                    details={"phase": "entry_rng_snapshot", "rollback_attempted": False, "fail_stop": True},
+                )
+            raise
 
     generation_id: str | None = None
+    stage_phase = "preflight"
     try:
         checked = _preflight_and_reconcile(payload, expected_config)
         decoded = checked["decoded"]
@@ -669,6 +772,7 @@ def resume(
         final_state = reconciled["final_state"]
         generation_id = checked["provenance"]["generation_id"]
 
+        stage_phase = "stage_state"
         staged_model = stage_model_state(decoded["model"], model)
         expected_updated_pids = {
             pid
@@ -702,16 +806,21 @@ def resume(
             "sampler": reconciled["sampler"],
             "provenance": checked["provenance"],
         }
+
+        stage_phase = "live_snapshot"
+        snap_model = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        snap_adamw = clone_optimizer_state_dict(opt)
     except Exception as exc:
         rb_errors = restore_cpu_rng_snapshot(restore_rng)
         if rb_errors:
             if failure_root is not None:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     failure_root,
                     "fatal_rollback",
-                    "CPU RNG rollback failed during resume staging failure",
+                    f"CPU RNG rollback failed during resume {stage_phase} failure",
                     generation_id=generation_id,
                     details={
+                        "phase": stage_phase,
                         "original_error": str(exc),
                         "rollback_errors": rb_errors,
                         "fatal": True,
@@ -724,17 +833,15 @@ def resume(
                 rollback_errors=rb_errors,
             ) from exc
         if failure_root is not None:
-            write_failure_receipt(
+            receipt_stage = "resume_snapshot" if stage_phase == "live_snapshot" else "resume_stage"
+            _safe_write_failure_receipt(
                 failure_root,
-                "resume_stage",
+                receipt_stage,
                 str(exc),
                 generation_id=generation_id,
-                details={"rollback_succeeded": True},
+                details={"phase": stage_phase, "rollback_succeeded": True, "fail_stop": True},
             )
         raise
-
-    snap_model = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    snap_adamw = clone_optimizer_state_dict(opt)
 
     try:
         model.load_state_dict(staged_model, strict=True)
@@ -746,12 +853,13 @@ def resume(
         rb_errors = _rollback_live_state(model, opt, snap_model, snap_adamw, restore_rng)
         if rb_errors:
             if failure_root is not None:
-                write_failure_receipt(
+                _safe_write_failure_receipt(
                     failure_root,
                     "fatal_rollback",
                     "live state/RNG rollback failed during resume apply failure",
                     generation_id=generation_id,
                     details={
+                        "phase": "live_apply",
                         "original_error": str(exc),
                         "rollback_errors": rb_errors,
                         "fatal": True,
@@ -764,12 +872,12 @@ def resume(
                 rollback_errors=rb_errors,
             ) from exc
         if failure_root is not None:
-            write_failure_receipt(
+            _safe_write_failure_receipt(
                 failure_root,
                 "resume_apply",
                 str(exc),
                 generation_id=generation_id,
-                details={"rollback_succeeded": True},
+                details={"phase": "live_apply", "rollback_succeeded": True, "fail_stop": True},
             )
         raise
 
