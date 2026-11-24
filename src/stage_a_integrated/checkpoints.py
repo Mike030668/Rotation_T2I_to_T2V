@@ -1128,7 +1128,26 @@ def _validate_adamw_slot(slot: object, live_param, *, completed: int) -> dict:
     if live_param.device.type != "cpu" or not live_param.is_floating_point():
         raise ValueError("live parameter must be a floating-point CPU tensor")
 
-    validated = {}
+    step_val = slot["step"]
+    if isinstance(step_val, torch.Tensor):
+        if step_val.device.type != "cpu" or step_val.ndim != 0 or step_val.dtype == torch.bool or step_val.is_complex():
+            raise ValueError("adamw state step tensor must be non-bool real CPU scalar")
+        if not bool(torch.isfinite(step_val).item()):
+            raise ValueError("adamw state step tensor is nonfinite")
+        step_num = float(step_val.item())
+        if not step_num.is_integer() or int(step_num) != completed:
+            raise ValueError("adamw state step tensor must be integral and equal completed")
+        validated_step = step_val.detach().clone()
+    elif type(step_val) is int:
+        if step_val != completed:
+            raise ValueError("adamw state step int must equal completed")
+        validated_step = step_val
+    else:
+        raise ValueError("adamw state step must be an integral scalar Tensor or exact int")
+
+    # Preserve canonical PyTorch AdamW slot key insertion order ("step", "exp_avg", "exp_avg_sq")
+    # so resumed torch.save(opt.state_dict()) matches uninterrupted serialization byte-for-byte.
+    validated = {"step": validated_step}
     for field in ("exp_avg", "exp_avg_sq"):
         tensor = slot[field]
         if not isinstance(tensor, torch.Tensor):
@@ -1142,23 +1161,6 @@ def _validate_adamw_slot(slot: object, live_param, *, completed: int) -> dict:
         if field == "exp_avg_sq" and not bool((tensor >= 0).all().item()):
             raise ValueError("adamw state exp_avg_sq contains negative entries")
         validated[field] = tensor.detach().clone()
-
-    step_val = slot["step"]
-    if isinstance(step_val, torch.Tensor):
-        if step_val.device.type != "cpu" or step_val.ndim != 0 or step_val.dtype == torch.bool or step_val.is_complex():
-            raise ValueError("adamw state step tensor must be non-bool real CPU scalar")
-        if not bool(torch.isfinite(step_val).item()):
-            raise ValueError("adamw state step tensor is nonfinite")
-        step_num = float(step_val.item())
-        if not step_num.is_integer() or int(step_num) != completed:
-            raise ValueError("adamw state step tensor must be integral and equal completed")
-        validated["step"] = step_val.detach().clone()
-    elif type(step_val) is int:
-        if step_val != completed:
-            raise ValueError("adamw state step int must equal completed")
-        validated["step"] = step_val
-    else:
-        raise ValueError("adamw state step must be an integral scalar Tensor or exact int")
 
     return validated
 
