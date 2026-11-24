@@ -492,6 +492,8 @@ def _validate_adamw_slot(slot: object, expected_shape, *, completed: int) -> dic
         if completed == 0:
             return {}
         raise ValueError("adamw state entry unexpectedly empty after updates")
+    if completed > 0 and not {"step", "exp_avg", "exp_avg_sq"}.issubset(slot.keys()):
+        raise ValueError("adamw state entry missing required AdamW tensors")
     validated = {}
     for field, val in slot.items():
         if isinstance(val, torch.Tensor):
@@ -786,6 +788,7 @@ def publish(root: Path, generation_id: str, role: str, payload: bytes) -> dict:
     stage_root = root / "stage"
     generations.mkdir(parents=True, exist_ok=True)
     stage_root.mkdir(parents=True, exist_ok=True)
+    _fsync_dir(root)
     if generations.stat().st_dev != stage_root.stat().st_dev:
         raise ValueError("stage and generations must be on the same filesystem")
 
@@ -822,8 +825,16 @@ def publish(root: Path, generation_id: str, role: str, payload: bytes) -> dict:
     manifest_bytes = canonical_json_bytes(manifest, max_bytes=MAX_MANIFEST_BYTES)
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
 
-    stage = stage_root / f"{generation_id}-{role}"
+    stage: Path | None = None
+    for seq in range(1, MAX_FAILURE_RECEIPTS + 1):
+        candidate = stage_root / f"{generation_id}-{role}.tmp-{seq:04d}"
+        if not candidate.exists():
+            stage = candidate
+            break
+    if stage is None:
+        raise ValueError("stage directory reached MAX_FAILURE_RECEIPTS")
     stage.mkdir(parents=False, exist_ok=False)
+    _fsync_dir(stage_root)
     target = stage / "checkpoint.bin"
     target.write_bytes(payload)
     _fsync_file(target)

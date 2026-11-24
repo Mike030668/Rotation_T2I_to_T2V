@@ -10,6 +10,7 @@ from . import CANDIDATE_SHA256, HORIZONS_SHA256, LOSS_SHA256, SAMPLER_SHA256
 from .authorization import ExecutionNotAuthorized, load
 from .checkpoints import (
     CHECKPOINT_SCHEMA_VERSION,
+    MAX_HORIZONS_FILE_BYTES,
     MAX_RNG_SECTION_BYTES,
     OWNER_TRUST_ROOT_STATUS,
     POINTER_SCHEMA_VERSION,
@@ -196,7 +197,7 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     source_digest = verify_train_ids_pin(train_ids())
     root = Path(release.get("output_root"))
     horizons_path = Path(config["horizons_path"])
-    horizons_file_sha256 = file_sha256(horizons_path)
+    horizons_file_sha256 = file_sha256(horizons_path, max_bytes=MAX_HORIZONS_FILE_BYTES)
     effective_config_bytes = _canonical_effective_config_bytes(
         max_updates=max_updates,
         batch_size=batch_size,
@@ -237,13 +238,16 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                 if type(raw_resume) is not bytes:
                     raise ValueError("config.resume_bytes must be bytes")
                 resume_payload = raw_resume
-            _preflight_and_reconcile(resume_payload, expected_resume_cfg)
+            preflight = _preflight_and_reconcile(resume_payload, expected_resume_cfg)
+            if int(preflight["reconciled"]["final_state"]["completed"]) > max_updates:
+                raise ValueError("checkpoint completed step exceeds config.max_updates")
         except Exception as exc:
+            raw_role = config.get("resume_role")
             write_failure_receipt(
                 root,
                 "resume_preflight",
                 str(exc),
-                details={"resume_role": config.get("resume_role")},
+                details={"resume_role": raw_role if type(raw_role) in (str, type(None)) else repr(raw_role)},
             )
             raise
 
@@ -323,6 +327,15 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
             generation_id = f"u{completed}"
             try:
                 value = evaluate(model, items, keys)
+            except Exception as exc:
+                write_failure_receipt(
+                    root,
+                    "dev_eval_failure",
+                    str(exc),
+                    generation_id=generation_id,
+                    details={"completed": completed},
+                )
+                raise
             finally:
                 model.train()
             if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
