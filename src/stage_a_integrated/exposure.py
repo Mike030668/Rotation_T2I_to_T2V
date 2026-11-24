@@ -101,7 +101,6 @@ def require_records(records: list, completed: int) -> None:
     if len(records) != completed:
         raise ValueError("exposure length does not match completed")
     for index, record in enumerate(records, start=1):
-        replay_ordinals(record)
         if record.get("schema") != "exposure-v1" or record.get("completed") != index or record.get("provider") != "SYNTHETIC_APPARATUS":
             raise ValueError("exposure schema or step mismatch")
         for key in ("videos", "selected_ordinals", "selected_labels", "current_ordinal", "target_ordinal", "current", "target", "ids_frames", "horizon", "epoch", "cursor", "seed"):
@@ -138,3 +137,4 @@ def require_records(records: list, completed: int) -> None:
                 raise ValueError("selected ordinal does not match the pinned source label")
             if frame_labels[current_ord] != current or frame_labels[target_ord] != target:
                 raise ValueError("current or target label does not match the pinned source")
+        replay_ordinals(record)
