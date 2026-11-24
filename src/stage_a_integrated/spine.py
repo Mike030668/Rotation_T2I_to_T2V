@@ -6,9 +6,33 @@ import hashlib
 import math
 from pathlib import Path
 
-from . import SAMPLER_SHA256
+from . import CANDIDATE_SHA256, HORIZONS_SHA256, LOSS_SHA256, SAMPLER_SHA256
 from .authorization import ExecutionNotAuthorized, load
-from .checkpoints import pack, publish, unpack
+from .checkpoints import (
+    CHECKPOINT_SCHEMA_VERSION,
+    MAX_RNG_SECTION_BYTES,
+    OWNER_TRUST_ROOT_STATUS,
+    POINTER_SCHEMA_VERSION,
+    PROVENANCE_SCHEMA_VERSION,
+    build_expected_provenance,
+    clone_optimizer_state_dict,
+    file_sha256,
+    pack,
+    publish,
+    resolve_pointer,
+    stage_adamw_state,
+    stage_model_state,
+    stage_numpy_rng,
+    stage_python_rng,
+    stage_torch_rng,
+    unpack,
+    validate_numpy_rng_bytes,
+    validate_python_rng_bytes,
+    validate_torch_rng_bytes,
+    verify_baseline_provenance,
+    verify_checkpoint_provenance,
+    write_failure_receipt,
+)
 from .dev import evaluate, load_keys, load_rows
 from .exposure import (
     FORWARD_BINDING,
@@ -17,6 +41,7 @@ from .exposure import (
     SCHEMA_VERSION,
     build_receipt_bytes,
     build_sampler_section_bytes,
+    canonical_json_bytes,
     reconcile_checkpoint_state,
     require_record,
 )
@@ -53,10 +78,19 @@ def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]
     clip = float(raw_clip)
     if type(config.get("horizons_path")) is not str or not config["horizons_path"]:
         raise ValueError("config.horizons_path must be a nonempty string")
+    if "release_created" in config and config["release_created"] is not False:
+        raise ValueError("config.release_created must be false")
     pin_checks = {
+        "candidate_sha256": CANDIDATE_SHA256,
+        "loss_sha256": LOSS_SHA256,
+        "horizons_sha256": HORIZONS_SHA256,
         "sampler_sha256": SAMPLER_SHA256,
         "exposure_schema": SCHEMA_VERSION,
         "sampler_schema": SAMPLER_SCHEMA_VERSION,
+        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
+        "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "pointer_schema": POINTER_SCHEMA_VERSION,
+        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
         "synthetic_source_id": SYNTHETIC_SOURCE_ID,
         "synthetic_train_size": SYNTHETIC_TRAIN_SIZE,
         "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
@@ -65,8 +99,90 @@ def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]
     }
     for key, expected_val in pin_checks.items():
         if key in config and config[key] != expected_val:
-            raise ValueError(f"config.{key} does not match pinned C1 contract")
+            raise ValueError(f"config.{key} does not match pinned C2 contract")
     return max_updates, batch_size, seed, dev_events, clip
+
+
+def _canonical_effective_config_bytes(
+    *,
+    max_updates: int,
+    batch_size: int,
+    seed: int,
+    dev_events: list[int],
+    clip: float,
+    horizons_file_sha256: str,
+) -> bytes:
+    effective = {
+        "max_updates": max_updates,
+        "batch": batch_size,
+        "seed": seed,
+        "dev_events": list(dev_events),
+        "clip": clip,
+        "candidate_sha256": CANDIDATE_SHA256,
+        "loss_sha256": LOSS_SHA256,
+        "horizons_sha256": HORIZONS_SHA256,
+        "horizons_file_sha256": horizons_file_sha256,
+        "sampler_sha256": SAMPLER_SHA256,
+        "exposure_schema": SCHEMA_VERSION,
+        "sampler_schema": SAMPLER_SCHEMA_VERSION,
+        "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
+        "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "pointer_schema": POINTER_SCHEMA_VERSION,
+        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
+        "synthetic_source_id": SYNTHETIC_SOURCE_ID,
+        "synthetic_train_size": SYNTHETIC_TRAIN_SIZE,
+        "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
+        "synthetic_remainder_policy": REMAINDER_POLICY,
+        "forward_binding": FORWARD_BINDING,
+        "release_created": False,
+    }
+    return canonical_json_bytes(effective, max_bytes=65536)
+
+
+def _preflight_and_reconcile(payload: bytes, expected_config: dict) -> dict:
+    if type(expected_config) is not dict:
+        raise ValueError("expected_config must be a dict")
+    expected_seed = require_exact_int(expected_config.get("seed"), "expected_config.seed", minimum=0, maximum=MAX_SEED)
+    expected_batch = require_exact_int(
+        expected_config.get("batch"),
+        "expected_config.batch",
+        minimum=1,
+        maximum=SYNTHETIC_TRAIN_SIZE,
+    )
+    expected_source_id = expected_config.get("source_id", SYNTHETIC_SOURCE_ID)
+    expected_source_sha256 = expected_config.get("source_sha256", SYNTHETIC_TRAIN_IDS_SHA256)
+    expected_sampler_sha256 = expected_config.get("sampler_sha256", SAMPLER_SHA256)
+
+    decoded = unpack(payload)
+    header = _admit(decoded)
+    expected_prov = expected_config.get("expected_provenance")
+    provenance = (
+        verify_checkpoint_provenance(header, expected_prov)
+        if expected_prov is not None
+        else verify_baseline_provenance(header)
+    )
+    reconciled = reconcile_checkpoint_state(
+        header,
+        decoded["sampler"],
+        decoded["exposure"],
+        expected_seed=expected_seed,
+        expected_batch=expected_batch,
+        expected_source_id=expected_source_id,
+        expected_source_sha256=expected_source_sha256,
+        expected_sampler_sha256=expected_sampler_sha256,
+    )
+    py_rng = validate_python_rng_bytes(decoded["python_rng"])
+    np_rng = validate_numpy_rng_bytes(decoded["numpy_rng"])
+    torch_rng_bytes = validate_torch_rng_bytes(decoded["torch_rng"])
+    return {
+        "decoded": decoded,
+        "header": header,
+        "provenance": provenance,
+        "reconciled": reconciled,
+        "py_rng": py_rng,
+        "np_rng": np_rng,
+        "torch_rng_bytes": torch_rng_bytes,
+    }
 
 
 def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, config: dict) -> dict:
@@ -78,13 +194,66 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         raise ExecutionNotAuthorized("config exceeds the released budget")
     sampler_digest = verify_sampler_pin()
     source_digest = verify_train_ids_pin(train_ids())
+    root = Path(release.get("output_root"))
+    horizons_path = Path(config["horizons_path"])
+    horizons_file_sha256 = file_sha256(horizons_path)
+    effective_config_bytes = _canonical_effective_config_bytes(
+        max_updates=max_updates,
+        batch_size=batch_size,
+        seed=seed,
+        dev_events=dev_events,
+        clip=clip,
+        horizons_file_sha256=horizons_file_sha256,
+    )
+    base_provenance = build_expected_provenance(
+        effective_config_bytes,
+        horizons_path,
+        generation_id=None,
+        horizons_file_sha256=horizons_file_sha256,
+    )
+
+    has_resume_bytes = config.get("resume_bytes") is not None
+    has_resume_role = config.get("resume_role") is not None
+    if has_resume_bytes and has_resume_role:
+        raise ValueError("config cannot specify both resume_bytes and resume_role")
+
+    resume_payload: bytes | None = None
+    expected_resume_cfg = {
+        "seed": seed,
+        "batch": batch_size,
+        "source_id": SYNTHETIC_SOURCE_ID,
+        "source_sha256": source_digest,
+        "sampler_sha256": sampler_digest,
+        "expected_provenance": base_provenance,
+    }
+    if has_resume_bytes or has_resume_role:
+        try:
+            if has_resume_role:
+                role = config["resume_role"]
+                resolved = resolve_pointer(root, role)
+                resume_payload = resolved["payload"]
+            else:
+                raw_resume = config["resume_bytes"]
+                if type(raw_resume) is not bytes:
+                    raise ValueError("config.resume_bytes must be bytes")
+                resume_payload = raw_resume
+            _preflight_and_reconcile(resume_payload, expected_resume_cfg)
+        except Exception as exc:
+            write_failure_receipt(
+                root,
+                "resume_preflight",
+                str(exc),
+                details={"resume_role": config.get("resume_role")},
+            )
+            raise
+
     import torch
 
     model_cls, config_cls = load_class()
     model = model_cls(config_cls())
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
-    rows = load_rows(Path(config["horizons_path"]))
-    keys = load_keys(Path(config["horizons_path"]))
+    rows = load_rows(horizons_path)
+    keys = load_keys(horizons_path)
     completed = 0
     epoch = 0
     cursor = 0
@@ -94,18 +263,13 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
     macros = {}
     events = []
     exposure_frames: list[bytes] = []
-    if config.get("resume_bytes"):
+    if resume_payload is not None:
         restored = resume(
-            config["resume_bytes"],
+            resume_payload,
             model,
             opt,
-            {
-                "seed": seed,
-                "batch": batch_size,
-                "source_id": SYNTHETIC_SOURCE_ID,
-                "source_sha256": source_digest,
-                "sampler_sha256": sampler_digest,
-            },
+            expected_resume_cfg,
+            failure_root=root,
         )
         completed = int(restored["completed"])
         epoch = int(restored["epoch"])
@@ -116,7 +280,6 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         events = [int(event) for event in restored["events"]]
         macros = {int(step): float(value) for step, value in restored["macros"].items()}
         exposure_frames = list(restored["exposure_frames"])
-    root = Path(release.get("output_root"))
     items = dev_items(rows)
     while completed < max_updates:
         step_epoch, cursor_before, expected_cursor_after = advance_window(epoch, cursor, batch_size)
@@ -157,8 +320,21 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
         last_receipt_sha256 = record["receipt_sha256"]
         exposure_frames.append(frozen_bytes)
         if completed in dev_events:
-            value = evaluate(model, items, keys)
-            model.train()
+            generation_id = f"u{completed}"
+            try:
+                value = evaluate(model, items, keys)
+            finally:
+                model.train()
+            if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
+                write_failure_receipt(
+                    root,
+                    "dev_nonfinite",
+                    f"nonfinite DEV metric at {generation_id}",
+                    generation_id=generation_id,
+                    details={"completed": completed, "value": repr(value)},
+                )
+                raise ValueError(f"nonfinite DEV metric at step {completed}")
+            value = float(value)
             macros[completed] = value
             if best is None or value < best[1]:
                 best = (completed, value)
@@ -176,6 +352,12 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                 exposure_journal_bytes=exposure_journal_bytes,
                 last_receipt_sha256=last_receipt_sha256,
             )
+            step_provenance = build_expected_provenance(
+                effective_config_bytes,
+                horizons_path,
+                generation_id=generation_id,
+                horizons_file_sha256=horizons_file_sha256,
+            )
             payload = pack(
                 {
                     "completed": completed,
@@ -189,18 +371,29 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                     "exposure_schema": SCHEMA_VERSION,
                     "exposure_journal_sha256": exposure_journal_sha256,
                     "last_receipt_sha256": last_receipt_sha256,
+                    "provenance": step_provenance,
                     "macro": value,
                     "best_step": None if best is None else best[0],
                     "best_macro": None if best is None else best[1],
                     "best_history": history,
                     "events": events,
-                    "macros": macros,
+                    "macros": {str(step): metric for step, metric in macros.items()},
                 },
                 _sections(model, opt, sampler_bytes, exposure_journal_bytes),
             )
-            publish(root, f"u{completed}", "LAST", payload)
-            if best is not None and best[0] == completed:
-                publish(root, f"u{completed}", "BEST", payload)
+            try:
+                publish(root, generation_id, "LAST", payload)
+                if best is not None and best[0] == completed:
+                    publish(root, generation_id, "BEST", payload)
+            except Exception as exc:
+                write_failure_receipt(
+                    root,
+                    "checkpoint_publish",
+                    str(exc),
+                    generation_id=generation_id,
+                    details={"completed": completed},
+                )
+                raise
     return {
         "completed_updates": completed,
         "best_step": None if best is None else best[0],
@@ -247,56 +440,121 @@ def _admit(decoded: dict) -> dict:
     return header
 
 
+def _python_state() -> list:
+    import random
+
+    version, state_tuple, gauss = random.getstate()
+    return [int(version), [int(word) for word in state_tuple], None if gauss is None else float(gauss)]
+
+
 def _numpy_state() -> list:
     import numpy
 
     algo, keys, pos, has_gauss, cached = numpy.random.get_state()
-    return [algo, keys.tolist(), pos, has_gauss, cached]
+    return [str(algo), [int(word) for word in keys.tolist()], int(pos), int(has_gauss), float(cached)]
 
 
-def resume(payload: bytes, model, opt, expected_config: dict) -> dict:
-    import io
-    import json
+def _rollback_live_state(
+    model,
+    opt,
+    snap_model: dict,
+    snap_adamw: dict,
+    snap_py_rng: tuple,
+    snap_np_rng: tuple,
+    snap_torch_rng,
+) -> None:
     import random
 
     import numpy
     import torch
 
-    if type(expected_config) is not dict:
-        raise ValueError("expected_config must be a dict")
-    expected_seed = require_exact_int(expected_config.get("seed"), "expected_config.seed", minimum=0, maximum=MAX_SEED)
-    expected_batch = require_exact_int(
-        expected_config.get("batch"),
-        "expected_config.batch",
-        minimum=1,
-        maximum=SYNTHETIC_TRAIN_SIZE,
-    )
-    expected_source_id = expected_config.get("source_id", SYNTHETIC_SOURCE_ID)
-    expected_source_sha256 = expected_config.get("source_sha256", SYNTHETIC_TRAIN_IDS_SHA256)
-    expected_sampler_sha256 = expected_config.get("sampler_sha256", SAMPLER_SHA256)
+    errors = []
+    for name, action in (
+        ("model", lambda: model.load_state_dict(snap_model, strict=True)),
+        ("adamw", lambda: opt.load_state_dict(snap_adamw)),
+        ("python_rng", lambda: random.setstate(snap_py_rng)),
+        ("numpy_rng", lambda: numpy.random.set_state(snap_np_rng)),
+        ("torch_rng", lambda: torch.set_rng_state(snap_torch_rng)),
+    ):
+        try:
+            action()
+        except Exception as rb_exc:
+            errors.append(f"{name}: {rb_exc}")
+    if errors:
+        raise RuntimeError("resume rollback failure: " + "; ".join(errors))
 
-    decoded = unpack(payload)
-    header = _admit(decoded)
-    reconciled = reconcile_checkpoint_state(
-        header,
-        decoded["sampler"],
-        decoded["exposure"],
-        expected_seed=expected_seed,
-        expected_batch=expected_batch,
-        expected_source_id=expected_source_id,
-        expected_source_sha256=expected_source_sha256,
-        expected_sampler_sha256=expected_sampler_sha256,
-    )
 
-    model.load_state_dict(torch.load(io.BytesIO(decoded["model"]), map_location="cpu", weights_only=True))
-    opt.load_state_dict(torch.load(io.BytesIO(decoded["adamw"]), map_location="cpu", weights_only=True))
-    version, state, gauss = json.loads(decoded["python_rng"].decode("utf-8"))
-    random.setstate((version, tuple(state), gauss))
-    algo, keys, pos, has_gauss, cached = json.loads(decoded["numpy_rng"].decode("utf-8"))
-    numpy.random.set_state((algo, numpy.array(keys, dtype="uint32"), pos, has_gauss, cached))
-    torch.set_rng_state(torch.tensor(list(decoded["torch_rng"]), dtype=torch.uint8))
+def resume(
+    payload: bytes,
+    model,
+    opt,
+    expected_config: dict,
+    *,
+    failure_root: Path | None = None,
+) -> dict:
+    import random
 
-    final_state = reconciled["final_state"]
+    import numpy
+    import torch
+
+    generation_id: str | None = None
+    try:
+        checked = _preflight_and_reconcile(payload, expected_config)
+        decoded = checked["decoded"]
+        header = checked["header"]
+        reconciled = checked["reconciled"]
+        final_state = reconciled["final_state"]
+        generation_id = checked["provenance"]["generation_id"]
+
+        staged_model = stage_model_state(decoded["model"], model)
+        staged_adamw = stage_adamw_state(decoded["adamw"], opt, completed=int(final_state["completed"]))
+        staged_py_rng = stage_python_rng(decoded["python_rng"])
+        staged_np_rng = stage_numpy_rng(decoded["numpy_rng"])
+        staged_torch_rng = stage_torch_rng(decoded["torch_rng"])
+    except Exception as exc:
+        if failure_root is not None:
+            write_failure_receipt(
+                failure_root,
+                "resume_stage",
+                str(exc),
+                generation_id=generation_id,
+            )
+        raise
+
+    snap_model = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    snap_adamw = clone_optimizer_state_dict(opt)
+    snap_py_rng = random.getstate()
+    np_algo, np_keys, np_pos, np_has_gauss, np_cached = numpy.random.get_state()
+    snap_np_rng = (np_algo, np_keys.copy(), np_pos, np_has_gauss, np_cached)
+    snap_torch_rng = torch.get_rng_state().clone()
+
+    try:
+        model.load_state_dict(staged_model, strict=True)
+        opt.load_state_dict(staged_adamw)
+        random.setstate(staged_py_rng)
+        numpy.random.set_state(staged_np_rng)
+        torch.set_rng_state(staged_torch_rng)
+    except Exception as exc:
+        try:
+            _rollback_live_state(
+                model,
+                opt,
+                snap_model,
+                snap_adamw,
+                snap_py_rng,
+                snap_np_rng,
+                snap_torch_rng,
+            )
+        finally:
+            if failure_root is not None:
+                write_failure_receipt(
+                    failure_root,
+                    "resume_apply",
+                    str(exc),
+                    generation_id=generation_id,
+                )
+        raise
+
     return {
         "completed": final_state["completed"],
         "epoch": final_state["epoch"],
@@ -309,13 +567,12 @@ def resume(payload: bytes, model, opt, expected_config: dict) -> dict:
         "exposure": reconciled["records"],
         "exposure_frames": reconciled["frames"],
         "sampler": reconciled["sampler"],
+        "provenance": checked["provenance"],
     }
 
 
 def _sections(model, opt, sampler_bytes: bytes, exposure_journal_bytes: bytes) -> dict[str, bytes]:
     import io
-    import json
-    import random
 
     import torch
 
@@ -326,8 +583,8 @@ def _sections(model, opt, sampler_bytes: bytes, exposure_journal_bytes: bytes) -
     return {
         "model": model_buf.getvalue(),
         "adamw": opt_buf.getvalue(),
-        "python_rng": json.dumps(random.getstate()).encode("utf-8"),
-        "numpy_rng": json.dumps(_numpy_state()).encode("utf-8"),
+        "python_rng": canonical_json_bytes(_python_state(), max_bytes=MAX_RNG_SECTION_BYTES),
+        "numpy_rng": canonical_json_bytes(_numpy_state(), max_bytes=MAX_RNG_SECTION_BYTES),
         "torch_rng": bytes(torch.get_rng_state().tolist()),
         "sampler": sampler_bytes,
         "exposure": exposure_journal_bytes,
