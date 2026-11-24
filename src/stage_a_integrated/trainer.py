@@ -1,4 +1,4 @@
-"""One update with C3 pre-forward receipt-bound digest verification."""
+"""One update with C3/C4 pre-forward receipt-bound digest and supervision verification."""
 
 from __future__ import annotations
 
@@ -21,7 +21,12 @@ def optimizer_step(model, items: list[dict], opt, clip: float, *, expected_forwa
 
     verified_calls: list[tuple[dict, dict]] = []
     for item, exp_digest in zip(items, expected_forward_digests):
-        frozen_kwargs = prepare_verified_forward_call(item, expected_digest=exp_digest, context="train")
+        frozen_kwargs = prepare_verified_forward_call(
+            item,
+            expected_digest=exp_digest,
+            context="train",
+            verify_canonical_supervision=True,
+        )
         assert_no_target_leak(item, verify_canonical_oracle=True)
         verified_calls.append((frozen_kwargs, item["supervision"]))
 

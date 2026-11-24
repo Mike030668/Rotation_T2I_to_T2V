@@ -1,4 +1,4 @@
-"""Canonical C3 forward-input binding (`fwd-input-v1`) and representation firewall.
+"""Canonical C3/C4 forward-input and supervision binding (`fwd-input-v1`) + invariance controls.
 
 This module intentionally avoids importing ``torch`` or ``numpy`` at import time so
 checkpoint preflight and ``exposure-v2`` structural reconciliation remain Torch-free
@@ -13,6 +13,7 @@ import struct
 
 FORWARD_BINDING_VERSION = "fwd-input-v1"
 FORWARD_DIGEST_MAGIC = b"STCA-FWD-INPUT-V1\x00"
+SUPERVISION_DIGEST_MAGIC = b"STCA-SUP-V1\x00"
 REPRESENTATION_FIREWALL = "PROXY_UNVALIDATED_E_TO_Z0"
 
 WIDTH = 1280
@@ -212,12 +213,12 @@ def synthetic_text_hidden_f32() -> list[float]:
     return [_f32(float(k) / 996.0) for k in range(WIDTH)]
 
 
-def _hash_framed_entries(entries: dict[str, tuple]) -> str:
-    if tuple(sorted(entries.keys())) != ALLOWED_FORWARD_KWARGS:
-        raise ValueError("canonical forward digest requires exact 9 allowed kwargs")
-    hasher = hashlib.sha256(FORWARD_DIGEST_MAGIC)
-    hasher.update(struct.pack("<I", len(ALLOWED_FORWARD_KWARGS)))
-    for key in ALLOWED_FORWARD_KWARGS:
+def _hash_framed_entries(entries: dict[str, tuple], *, magic: bytes, allowed_keys: tuple[str, ...]) -> str:
+    if tuple(sorted(entries.keys())) != allowed_keys:
+        raise ValueError("canonical framed digest key set mismatch")
+    hasher = hashlib.sha256(magic)
+    hasher.update(struct.pack("<I", len(allowed_keys)))
+    for key in allowed_keys:
         key_bytes = key.encode("utf-8")
         hasher.update(struct.pack("<I", len(key_bytes)))
         hasher.update(key_bytes)
@@ -299,7 +300,30 @@ def expected_synthetic_forward_digest(
         "text_valid_mask": ("T", "bool", (1, 1), b"\x01"),
         "transition": ("T", "float32", (1, TRANSITION_DIM), _pack_f32_sequence(transition)),
     }
-    return _hash_framed_entries(entries)
+    return _hash_framed_entries(entries, magic=FORWARD_DIGEST_MAGIC, allowed_keys=ALLOWED_FORWARD_KWARGS)
+
+
+def expected_synthetic_supervision_digest(
+    id_movi: str,
+    ids_frames: list[int],
+    current: int,
+    target: int,
+) -> str:
+    """Independent Torch-free pure-Python oracle for canonical synthetic target supervision."""
+    e0 = synthetic_image_row_f32(id_movi, ids_frames[0])
+    e_cur = e0 if current == ids_frames[0] else synthetic_image_row_f32(id_movi, current)
+    e_tgt = synthetic_image_row_f32(id_movi, target)
+    z0 = synthetic_prior_anchor_f32(id_movi)
+    delta_local = [_f32(t - c) for t, c in zip(e_tgt, e_cur)]
+    delta_anchor = [_f32(t - a0) for t, a0 in zip(e_tgt, e0)]
+    latent_proxy = [_f32(z + da) for z, da in zip(z0, delta_anchor)]
+    entries = {
+        "target_delta_local": ("T", "float32", (1, WIDTH), _pack_f32_sequence(delta_local)),
+        "target_delta_anchor": ("T", "float32", (1, WIDTH), _pack_f32_sequence(delta_anchor)),
+        "target_latent_proxy": ("T", "float32", (1, WIDTH), _pack_f32_sequence(latent_proxy)),
+    }
+    sorted_keys = tuple(sorted(REQUIRED_SUPERVISION_KEYS))
+    return _hash_framed_entries(entries, magic=SUPERVISION_DIGEST_MAGIC, allowed_keys=sorted_keys)
 
 
 def _storage_ptrs(container: dict | None) -> set[int]:
@@ -409,7 +433,8 @@ def canonical_forward_kwargs_digest(kwargs: dict) -> tuple[str, dict]:
             dtype_name = "bool"
         entries[key] = ("T", dtype_name, shape, raw_bytes)
 
-    return _hash_framed_entries(entries), frozen_kwargs
+    digest = _hash_framed_entries(entries, magic=FORWARD_DIGEST_MAGIC, allowed_keys=ALLOWED_FORWARD_KWARGS)
+    return digest, frozen_kwargs
 
 
 def validate_supervision(
@@ -441,7 +466,29 @@ def validate_supervision(
             raise ValueError(f"supervision {key} aliases forward kwargs storage")
 
 
-def prepare_verified_forward_call(item: dict, *, expected_digest: str, context: str) -> dict:
+def canonical_supervision_digest(supervision: dict) -> str:
+    """Validate supervision tensors and compute canonical binary32 SHA-256."""
+    validate_supervision(supervision)
+    sorted_keys = tuple(sorted(REQUIRED_SUPERVISION_KEYS))
+    entries = {
+        key: (
+            "T",
+            "float32",
+            (1, WIDTH),
+            _pack_f32_sequence(supervision[key].detach().contiguous().clone().reshape(-1).tolist()),
+        )
+        for key in sorted_keys
+    }
+    return _hash_framed_entries(entries, magic=SUPERVISION_DIGEST_MAGIC, allowed_keys=sorted_keys)
+
+
+def prepare_verified_forward_call(
+    item: dict,
+    *,
+    expected_digest: str,
+    context: str,
+    verify_canonical_supervision: bool = True,
+) -> dict:
     """Verify receipt/manifest forward digest against oracle and freeze clean kwargs pre-call."""
     if type(item) is not dict:
         raise ValueError(f"{context} item must be a dict")
@@ -486,19 +533,40 @@ def prepare_verified_forward_call(item: dict, *, expected_digest: str, context: 
         forbidden_kwargs=item.get("model_kwargs"),
         frozen_kwargs=frozen_kwargs,
     )
+    if verify_canonical_supervision:
+        actual_sup_digest = canonical_supervision_digest(item["supervision"])
+        expected_sup_digest = expected_synthetic_supervision_digest(
+            item["id_movi"],
+            item["ids_frames"],
+            item["current"],
+            item["target"],
+        )
+        if actual_sup_digest != expected_sup_digest:
+            raise ValueError(f"{context} actual supervision digest disagrees with canonical target oracle")
+        if "supervision_sha256" in item and item["supervision_sha256"] != expected_sup_digest:
+            raise ValueError(f"{context} item supervision_sha256 disagrees with target oracle")
     return frozen_kwargs
 
 
 def verify_forward_target_invariance(model, item: dict) -> dict:
-    """Prospective C3-02 runtime oracle (PREPARED_NOT_RUN under SOURCE_ONLY)."""
+    """Prospective C3-02/C4-03 invariance oracle with paired RNG/state reset (PREPARED_NOT_RUN)."""
     import torch
 
     from .checkpoints import capture_cpu_rng_snapshot, restore_cpu_rng_snapshot
     from .objective import load_criterion
     from .samples import _image, synthetic_item
 
+    modes = {bool(mod.training) for _, mod in model.named_modules()}
+    if len(modes) != 1:
+        raise ValueError("mixed module training/eval modes are not allowed in verify_forward_target_invariance")
+
     oracle_digest = _require_sha256_hex(item.get("forward_input_sha256"), "item.forward_input_sha256")
-    prepare_verified_forward_call(item, expected_digest=oracle_digest, context="invariance_entry")
+    prepare_verified_forward_call(
+        item,
+        expected_digest=oracle_digest,
+        context="invariance_entry",
+        verify_canonical_supervision=True,
+    )
     image = _image(item["id_movi"], item["ids_frames"])
     mutated_image = image.clone()
     mutated_image[item["ids_frames"].index(item["target"])] += 1.0
@@ -521,8 +589,22 @@ def verify_forward_target_invariance(model, item: dict) -> dict:
         item["horizon"],
         image=mutated_image,
     )
-    clean_kwargs = prepare_verified_forward_call(clean, expected_digest=oracle_digest, context="invariance_clean")
-    dirty_kwargs = prepare_verified_forward_call(dirty, expected_digest=oracle_digest, context="invariance_dirty")
+    clean_kwargs = prepare_verified_forward_call(
+        clean,
+        expected_digest=oracle_digest,
+        context="invariance_clean",
+        verify_canonical_supervision=True,
+    )
+    dirty_kwargs = prepare_verified_forward_call(
+        dirty,
+        expected_digest=oracle_digest,
+        context="invariance_dirty",
+        verify_canonical_supervision=False,
+    )
+    clean_digest_check, _ = canonical_forward_kwargs_digest(clean_kwargs)
+    dirty_digest_check, _ = canonical_forward_kwargs_digest(dirty_kwargs)
+    if clean_digest_check != oracle_digest or dirty_digest_check != oracle_digest:
+        raise ValueError("clean and target-perturbed forward kwargs digests diverged")
 
     criterion = load_criterion()
     was_training = bool(model.training)
@@ -530,13 +612,23 @@ def verify_forward_target_invariance(model, item: dict) -> dict:
     prev_last_sem = getattr(model, "_last_semantic_context", None)
     if isinstance(prev_last_sem, torch.Tensor):
         prev_last_sem = prev_last_sem.detach().clone()
-    rng_snap = capture_cpu_rng_snapshot()
+    caller_rng_snap = capture_cpu_rng_snapshot()
+
     try:
         model.eval()
+        paired_rng = capture_cpu_rng_snapshot()
         with torch.no_grad():
+            if hasattr(model, "_last_semantic_context"):
+                delattr(model, "_last_semantic_context")
             out_clean = model.forward(**clean_kwargs)
-            out_dirty = model.forward(**dirty_kwargs)
             loss_clean = float(criterion(out_clean, clean["supervision"])["total"].item())
+
+            rb_paired = restore_cpu_rng_snapshot(paired_rng)
+            if rb_paired:
+                raise RuntimeError(f"paired RNG reset failed before perturbed forward: {rb_paired}")
+            if hasattr(model, "_last_semantic_context"):
+                delattr(model, "_last_semantic_context")
+            out_dirty = model.forward(**dirty_kwargs)
             loss_dirty = float(criterion(out_dirty, dirty["supervision"])["total"].item())
     finally:
         model.train(was_training)
@@ -544,9 +636,9 @@ def verify_forward_target_invariance(model, item: dict) -> dict:
             model._last_semantic_context = prev_last_sem
         elif hasattr(model, "_last_semantic_context"):
             delattr(model, "_last_semantic_context")
-        rb_errors = restore_cpu_rng_snapshot(rng_snap)
+        rb_errors = restore_cpu_rng_snapshot(caller_rng_snap)
         if rb_errors:
-            raise RuntimeError(f"RNG restore failed in invariance check: {rb_errors}")
+            raise RuntimeError(f"caller RNG restore failed in invariance check: {rb_errors}")
 
     for key in ("pred_hybrid", "delta_local", "delta_anchor"):
         if not bool(torch.equal(out_clean[key], out_dirty[key])):
@@ -555,6 +647,8 @@ def verify_forward_target_invariance(model, item: dict) -> dict:
         raise ValueError("target-only mutation did not alter supervision loss")
     return {
         "forward_input_sha256": oracle_digest,
+        "clean_supervision_sha256": clean["supervision_sha256"],
+        "dirty_supervision_sha256": dirty["supervision_sha256"],
         "loss_clean": loss_clean,
         "loss_dirty": loss_dirty,
     }

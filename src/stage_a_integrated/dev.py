@@ -1,4 +1,4 @@
-"""Hardened 147-key DEV evaluator proposal with C3 forward-input binding. Not DS-frozen."""
+"""Frozen Stage A DEV evaluator (`stage-a-dev-v1`) with mandatory diagnostics and mutation guards."""
 
 from __future__ import annotations
 
@@ -19,15 +19,45 @@ from .forward_binding import (
     expected_synthetic_forward_digest,
     prepare_verified_forward_call,
 )
-from .plan import require_exact_int, train_ids
-from .samples import assert_no_target_leak
+from .plan import DEV_TEMPORAL_AXIS_SEMANTICS, require_exact_int, train_ids
+from .samples import assert_no_target_leak, synthetic_item
 
 BETA = 0.05
+LOCAL_WEIGHT = 0.5
+ANCHOR_WEIGHT = 0.5
 METRIC_NAME = "dev_delta_huber_macro"
-METRIC_STATUS = "PROPOSED_NOT_DS_FROZEN"
+METRIC_VERSION = "stage-a-dev-v1"
+METRIC_STATUS = "DS_FROZEN_STAGE_A_V1"
+METRIC_AGGREGATION = "equal_video_macro_50_over_147_pairs"
+METRIC_DIRECTION = "minimize"
+METRIC_TIE_POLICY = "earliest_strict_improvement_eps_0"
+METRIC_EPSILON = 0.0
+DIAGNOSTICS_POLICY = "mandatory_no_motion_norms_cosine_magnitude_no_aux_selection"
+H2_POLICY = "secondary_contrast_deferred_not_run"
+DEV_REPORT_SCHEMA_VERSION = "dev-report-v1"
+DIAG_EPS = 1e-8
+
 EXPECTED_DEV_VIDEOS = 50
 EXPECTED_DEV_PAIRS = 147
 HORIZON_NAMES = ("near", "mid", "far")
+PREDECLARED_ABSENT_MID_VIDEOS = frozenset({"28060", "37577", "17858"})
+
+
+class EvaluatorMutationError(RuntimeError):
+    """Raised fail-stop if DEV evaluation mutates model mode, state, grads, or CPU RNG."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        mutation_details: dict,
+        original_error: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.mutation_details = dict(mutation_details)
+        self.original_error = original_error
+        self.must_fail_stop = True
+        self.rollback_promised = False
 
 
 def load_rows(path: Path) -> list[dict]:
@@ -43,12 +73,16 @@ def load_rows(path: Path) -> list[dict]:
         raise ValueError("dev manifest header counts do not match 50 videos / 147 pairs")
     if doc.get("scored") is not False:
         raise ValueError("dev manifest scored flag must be false")
+    raw_mid_missing = doc.get("mid_missing")
+    if type(raw_mid_missing) is not list or set(raw_mid_missing) != PREDECLARED_ABSENT_MID_VIDEOS:
+        raise ValueError("dev manifest mid_missing does not match predeclared absent set")
     rows = doc.get("rows")
     if type(rows) is not list or len(rows) != EXPECTED_DEV_VIDEOS:
         raise ValueError("dev manifest is not 50 videos")
 
     train_set = set(train_ids())
     seen_videos: set[str] = set()
+    observed_mid_missing: set[str] = set()
     pair_count = 0
     for row in rows:
         if type(row) is not dict:
@@ -81,6 +115,10 @@ def load_rows(path: Path) -> list[dict]:
         for horizon in HORIZON_NAMES:
             target = row.get(horizon)
             if target is None:
+                if horizon == "mid":
+                    observed_mid_missing.add(id_movi)
+                else:
+                    raise ValueError(f"dev row {id_movi} silently omitted required horizon {horizon}")
                 continue
             target_val = require_exact_int(target, f"dev.row.{horizon}", minimum=current + 1, maximum=n_frames - 1)
             if target_val in history:
@@ -90,6 +128,8 @@ def load_rows(path: Path) -> list[dict]:
         if row_pairs == 0:
             raise ValueError("dev row has zero target horizons")
 
+    if observed_mid_missing != PREDECLARED_ABSENT_MID_VIDEOS:
+        raise ValueError("dev rows with missing mid do not match predeclared absent set")
     if pair_count != EXPECTED_DEV_PAIRS:
         raise ValueError("dev manifest total pairs is not 147")
     return rows
@@ -196,6 +236,15 @@ def _rng_snapshots_equal(left: tuple, right: tuple) -> bool:
     return bool(torch.equal(th_l, th_r))
 
 
+def _assert_uniform_module_mode(model) -> bool:
+    modes = {bool(mod.training) for _, mod in model.named_modules()}
+    if not modes:
+        return bool(model.training)
+    if len(modes) != 1:
+        raise ValueError("mixed module training/eval modes are not supported by DEV evaluator")
+    return next(iter(modes))
+
+
 def evaluate_with_diagnostics(
     model,
     items: list[dict],
@@ -203,8 +252,9 @@ def evaluate_with_diagnostics(
     *,
     expected_digests: dict[tuple, str] | None = None,
     forbidden_video_ids: set[str] | None = None,
+    require_external_expectations: bool = False,
 ) -> dict:
-    """Evaluate exact 147 DEV pairs with pre-forward binding, mode/state/RNG guards, and diagnostics."""
+    """Evaluate exact 147 DEV pairs under frozen `stage-a-dev-v1` with mutation checks on success/exception."""
     import torch
 
     if type(expected) is not set or len(expected) != EXPECTED_DEV_PAIRS:
@@ -212,8 +262,16 @@ def evaluate_with_diagnostics(
     expected_videos = {key[0] for key in expected}
     if len(expected_videos) != EXPECTED_DEV_VIDEOS:
         raise ValueError("expected DEV key set must span exact 50 videos")
-    forbidden = set(train_ids()) if forbidden_video_ids is None else set(forbidden_video_ids)
-    if not expected_videos.isdisjoint(forbidden):
+
+    pinned_train_ids = set(train_ids())
+    if require_external_expectations:
+        if expected_digests is None or forbidden_video_ids is None:
+            raise ValueError("canonical DEV evaluation requires external expected_digests and forbidden_video_ids")
+        if set(forbidden_video_ids) != pinned_train_ids:
+            raise ValueError("forbidden_video_ids disagrees with pinned 400-video train split")
+
+    forbidden = pinned_train_ids if forbidden_video_ids is None else set(forbidden_video_ids)
+    if not expected_videos.isdisjoint(forbidden) or not expected_videos.isdisjoint(pinned_train_ids):
         raise ValueError("DEV evaluation contains train/forbidden video IDs")
 
     if expected_digests is not None:
@@ -247,7 +305,12 @@ def evaluate_with_diagnostics(
                 item.get("horizon"),
             )
         )
-        frozen_kwargs = prepare_verified_forward_call(item, expected_digest=exp_digest, context="dev")
+        frozen_kwargs = prepare_verified_forward_call(
+            item,
+            expected_digest=exp_digest,
+            context="dev",
+            verify_canonical_supervision=True,
+        )
         assert_no_target_leak(item, verify_canonical_oracle=True)
         verified_entries.append((key, frozen_kwargs, item["supervision"], exp_digest))
 
@@ -255,7 +318,7 @@ def evaluate_with_diagnostics(
         raise ValueError("dev coverage mismatch prior to evaluation")
 
     eps, dir_cosine_fn, mag_ratio_fn = _load_loss_diagnostics()
-    was_training = bool(model.training)
+    was_training = _assert_uniform_module_mode(model)
     had_last_sem = hasattr(model, "_last_semantic_context")
     prev_last_sem = getattr(model, "_last_semantic_context", None)
     if isinstance(prev_last_sem, torch.Tensor):
@@ -266,15 +329,42 @@ def evaluate_with_diagnostics(
     grouped: dict[str, list[float]] = {}
     grouped_no_motion: dict[str, list[float]] = {}
     horizon_values: dict[str, list[float]] = {h: [] for h in HORIZON_NAMES}
-    direction_values: list[float] = []
-    magnitude_values: list[float] = []
-    digest_chain = hashlib.sha256()
+    horizon_no_motion: dict[str, list[float]] = {h: [] for h in HORIZON_NAMES}
 
+    dir_loss_local: list[float] = []
+    dir_loss_anchor: list[float] = []
+    dir_valid_tgt_local = 0
+    dir_valid_tgt_anchor = 0
+
+    raw_cos_local: list[float] = []
+    raw_cos_anchor: list[float] = []
+    raw_cos_undef_local = 0
+    raw_cos_undef_anchor = 0
+
+    mag_loss_local: list[float] = []
+    mag_loss_anchor: list[float] = []
+
+    pred_norms_local: list[float] = []
+    pred_norms_anchor: list[float] = []
+    tgt_norms_local: list[float] = []
+    tgt_norms_anchor: list[float] = []
+    norm_ratios_local: list[float] = []
+    norm_ratios_anchor: list[float] = []
+    zero_pred_local = 0
+    zero_pred_anchor = 0
+    zero_tgt_local = 0
+    zero_tgt_anchor = 0
+
+    sorted_entries = sorted(verified_entries, key=lambda entry: entry[0])
+    digest_chain = hashlib.sha256()
+    for _, _, _, exp_digest in sorted_entries:
+        digest_chain.update(exp_digest.encode("ascii"))
+
+    eval_exc: Exception | None = None
     try:
         model.eval()
         with torch.no_grad():
-            for key, frozen_kwargs, supervision, exp_digest in verified_entries:
-                digest_chain.update(exp_digest.encode("ascii"))
+            for key, frozen_kwargs, supervision, _ in verified_entries:
                 output = model.forward(**frozen_kwargs)
                 if type(output) is not dict or "delta_local" not in output or "delta_anchor" not in output:
                     raise ValueError("model.forward output missing delta_local/delta_anchor")
@@ -296,66 +386,205 @@ def evaluate_with_diagnostics(
                 anchor = torch.nn.functional.smooth_l1_loss(pred_anchor, tgt_anchor, beta=BETA)
                 if not bool(torch.isfinite(local).all().item()) or not bool(torch.isfinite(anchor).all().item()):
                     raise ValueError("nonfinite dev loss")
-                pair_loss = float(0.5 * (float(local.item()) + float(anchor.item())))
+                pair_loss = float(LOCAL_WEIGHT * float(local.item()) + ANCHOR_WEIGHT * float(anchor.item()))
 
                 zeros = torch.zeros_like(tgt_local)
                 nm_local = float(torch.nn.functional.smooth_l1_loss(zeros, tgt_local, beta=BETA).item())
                 nm_anchor = float(torch.nn.functional.smooth_l1_loss(zeros, tgt_anchor, beta=BETA).item())
-                pair_nm = 0.5 * (nm_local + nm_anchor)
+                pair_nm = LOCAL_WEIGHT * nm_local + ANCHOR_WEIGHT * nm_anchor
 
                 d_loc = float(dir_cosine_fn(pred_local, tgt_local, eps=eps).item())
                 d_anc = float(dir_cosine_fn(pred_anchor, tgt_anchor, eps=eps).item())
                 m_loc = float(mag_ratio_fn(pred_local, tgt_local, eps=eps).item())
                 m_anc = float(mag_ratio_fn(pred_anchor, tgt_anchor, eps=eps).item())
-                if not all(math.isfinite(x) for x in (pair_loss, pair_nm, d_loc, d_anc, m_loc, m_anc)):
+
+                p_norm_loc = float(torch.linalg.vector_norm(pred_local, dim=-1).item())
+                p_norm_anc = float(torch.linalg.vector_norm(pred_anchor, dim=-1).item())
+                t_norm_loc = float(torch.linalg.vector_norm(tgt_local, dim=-1).item())
+                t_norm_anc = float(torch.linalg.vector_norm(tgt_anchor, dim=-1).item())
+
+                scalars = (pair_loss, pair_nm, d_loc, d_anc, m_loc, m_anc, p_norm_loc, p_norm_anc, t_norm_loc, t_norm_anc)
+                if not all(math.isfinite(x) for x in scalars):
                     raise ValueError("nonfinite DEV diagnostic scalar")
 
                 id_movi, _, _, horizon = key
                 grouped.setdefault(id_movi, []).append(pair_loss)
                 grouped_no_motion.setdefault(id_movi, []).append(pair_nm)
                 horizon_values[horizon].append(pair_loss)
-                direction_values.append(0.5 * (d_loc + d_anc))
-                magnitude_values.append(0.5 * (m_loc + m_anc))
+                horizon_no_motion[horizon].append(pair_nm)
+
+                dir_loss_local.append(d_loc)
+                dir_loss_anchor.append(d_anc)
+                mag_loss_local.append(m_loc)
+                mag_loss_anchor.append(m_anc)
+                pred_norms_local.append(p_norm_loc)
+                pred_norms_anchor.append(p_norm_anc)
+                tgt_norms_local.append(t_norm_loc)
+                tgt_norms_anchor.append(t_norm_anc)
+
+                if p_norm_loc <= DIAG_EPS:
+                    zero_pred_local += 1
+                if p_norm_anc <= DIAG_EPS:
+                    zero_pred_anchor += 1
+
+                if t_norm_loc > DIAG_EPS:
+                    dir_valid_tgt_local += 1
+                    norm_ratios_local.append(p_norm_loc / t_norm_loc)
+                    if p_norm_loc > DIAG_EPS:
+                        dot_loc = float(torch.dot(pred_local[0], tgt_local[0]).item())
+                        cos_loc = max(-1.0, min(1.0, dot_loc / (p_norm_loc * t_norm_loc)))
+                        if not math.isfinite(cos_loc):
+                            raise ValueError("nonfinite raw cosine local")
+                        raw_cos_local.append(cos_loc)
+                    else:
+                        raw_cos_undef_local += 1
+                else:
+                    zero_tgt_local += 1
+                    raw_cos_undef_local += 1
+
+                if t_norm_anc > DIAG_EPS:
+                    dir_valid_tgt_anchor += 1
+                    norm_ratios_anchor.append(p_norm_anc / t_norm_anc)
+                    if p_norm_anc > DIAG_EPS:
+                        dot_anc = float(torch.dot(pred_anchor[0], tgt_anchor[0]).item())
+                        cos_anc = max(-1.0, min(1.0, dot_anc / (p_norm_anc * t_norm_anc)))
+                        if not math.isfinite(cos_anc):
+                            raise ValueError("nonfinite raw cosine anchor")
+                        raw_cos_anchor.append(cos_anc)
+                    else:
+                        raw_cos_undef_anchor += 1
+                else:
+                    zero_tgt_anchor += 1
+                    raw_cos_undef_anchor += 1
+    except Exception as exc:
+        eval_exc = exc
     finally:
         model.train(was_training)
         if had_last_sem:
             model._last_semantic_context = prev_last_sem
         elif hasattr(model, "_last_semantic_context"):
             delattr(model, "_last_semantic_context")
+        post_modes = {bool(mod.training) for _, mod in model.named_modules()}
+        mode_ok = (post_modes == {was_training}) if post_modes else (bool(model.training) == was_training)
+        state_ok = _model_state_and_grad_digest(model) == pre_state_digest
+        rng_ok = _rng_snapshots_equal(pre_rng, capture_cpu_rng_snapshot())
+        if not (mode_ok and state_ok and rng_ok):
+            raise EvaluatorMutationError(
+                "DEV evaluation mutated model mode, parameters, buffers, gradients, or CPU RNG state",
+                mutation_details={
+                    "mode_restored": mode_ok,
+                    "state_unchanged": state_ok,
+                    "rng_unchanged": rng_ok,
+                },
+                original_error=None if eval_exc is None else str(eval_exc),
+            ) from eval_exc
 
-    if bool(model.training) != was_training:
-        raise RuntimeError("DEV evaluation failed to restore model training mode")
-    if _model_state_and_grad_digest(model) != pre_state_digest:
-        raise RuntimeError("DEV evaluation mutated model parameters, buffers, or gradients")
-    if not _rng_snapshots_equal(pre_rng, capture_cpu_rng_snapshot()):
-        raise RuntimeError("DEV evaluation mutated CPU RNG state")
+    if eval_exc is not None:
+        raise eval_exc
 
     if set(grouped.keys()) != expected_videos or len(grouped) != EXPECTED_DEV_VIDEOS:
         raise ValueError("dev coverage mismatch")
 
-    per_video_macro = {vid: sum(vals) / len(vals) for vid, vals in grouped.items()}
-    per_video_counts = {vid: len(vals) for vid, vals in grouped.items()}
+    ordered_vids = sorted(grouped.keys())
+    per_video_macro = {vid: sum(grouped[vid]) / len(grouped[vid]) for vid in ordered_vids}
+    per_video_no_motion = {vid: sum(grouped_no_motion[vid]) / len(grouped_no_motion[vid]) for vid in ordered_vids}
+    per_video_delta = {vid: per_video_macro[vid] - per_video_no_motion[vid] for vid in ordered_vids}
+    per_video_counts = {vid: len(grouped[vid]) for vid in ordered_vids}
+
     macro = sum(per_video_macro.values()) / float(EXPECTED_DEV_VIDEOS)
-    no_motion_macro = sum(sum(vals) / len(vals) for vals in grouped_no_motion.values()) / float(EXPECTED_DEV_VIDEOS)
-    direction_mean = sum(direction_values) / float(len(direction_values))
-    magnitude_mean = sum(magnitude_values) / float(len(magnitude_values))
-    if not all(math.isfinite(v) for v in (macro, no_motion_macro, direction_mean, magnitude_mean)):
+    no_motion_macro = sum(per_video_no_motion.values()) / float(EXPECTED_DEV_VIDEOS)
+    if not math.isfinite(macro) or not math.isfinite(no_motion_macro):
         raise ValueError("nonfinite dev aggregate scalar")
 
+    raw_cos_loc_mean = (sum(raw_cos_local) / len(raw_cos_local)) if raw_cos_local else None
+    raw_cos_anc_mean = (sum(raw_cos_anchor) / len(raw_cos_anchor)) if raw_cos_anchor else None
+    raw_cos_mean = (
+        0.5 * (raw_cos_loc_mean + raw_cos_anc_mean)
+        if raw_cos_loc_mean is not None and raw_cos_anc_mean is not None
+        else None
+    )
+    ratio_loc_mean = (sum(norm_ratios_local) / len(norm_ratios_local)) if norm_ratios_local else None
+    ratio_anc_mean = (sum(norm_ratios_anchor) / len(norm_ratios_anchor)) if norm_ratios_anchor else None
+
+    per_horizon_macro = {h: (sum(horizon_values[h]) / len(horizon_values[h])) for h in HORIZON_NAMES}
+    per_horizon_no_motion = {h: (sum(horizon_no_motion[h]) / len(horizon_no_motion[h])) for h in HORIZON_NAMES}
+    per_horizon_delta = {h: per_horizon_macro[h] - per_horizon_no_motion[h] for h in HORIZON_NAMES}
+
+    dir_loc_mean = sum(dir_loss_local) / len(dir_loss_local)
+    dir_anc_mean = sum(dir_loss_anchor) / len(dir_loss_anchor)
+    mag_loc_mean = sum(mag_loss_local) / len(mag_loss_local)
+    mag_anc_mean = sum(mag_loss_anchor) / len(mag_loss_anchor)
+
     return {
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
         "metric_name": METRIC_NAME,
+        "metric_version": METRIC_VERSION,
         "metric_status": METRIC_STATUS,
         "beta": BETA,
+        "local_weight": LOCAL_WEIGHT,
+        "anchor_weight": ANCHOR_WEIGHT,
+        "aggregation": METRIC_AGGREGATION,
+        "direction": METRIC_DIRECTION,
+        "tie_policy": METRIC_TIE_POLICY,
+        "epsilon": METRIC_EPSILON,
+        "diagnostics_policy": DIAGNOSTICS_POLICY,
+        "h2_policy": H2_POLICY,
+        "temporal_axis_semantics": DEV_TEMPORAL_AXIS_SEMANTICS,
+        "horizons_sha256": HORIZONS_SHA256,
         "macro": float(macro),
         "no_motion_macro": float(no_motion_macro),
-        "direction_mean": float(direction_mean),
-        "magnitude_mean": float(magnitude_mean),
-        "video_count": len(grouped),
+        "delta_vs_no_motion": float(macro - no_motion_macro),
+        "beats_no_motion": bool(macro < no_motion_macro),
+        "signal_status": "STRICTLY_BELOW_NO_MOTION" if macro < no_motion_macro else "NO_POSITIVE_DELTA_SIGNAL",
+        "video_count": len(ordered_vids),
         "pair_count": EXPECTED_DEV_PAIRS,
+        "predeclared_absent_mid_videos": sorted(PREDECLARED_ABSENT_MID_VIDEOS),
         "per_video_macro": per_video_macro,
+        "per_video_no_motion_macro": per_video_no_motion,
+        "per_video_delta_vs_no_motion": per_video_delta,
         "per_video_counts": per_video_counts,
-        "per_horizon_macro": {h: (sum(v) / len(v)) for h, v in horizon_values.items()},
-        "per_horizon_counts": {h: len(v) for h, v in horizon_values.items()},
+        "per_horizon_macro": per_horizon_macro,
+        "per_horizon_no_motion_macro": per_horizon_no_motion,
+        "per_horizon_delta_vs_no_motion": per_horizon_delta,
+        "per_horizon_counts": {h: len(horizon_values[h]) for h in HORIZON_NAMES},
+        "directional_cosine_loss": {
+            "definition": "pinned_losses_v3.directional_cosine_per_sample: 1 - cos(pred, tgt) when ||tgt|| > 1e-8 else 0",
+            "local_mean": float(dir_loc_mean),
+            "anchor_mean": float(dir_anc_mean),
+            "mean": float(0.5 * (dir_loc_mean + dir_anc_mean)),
+            "valid_target_count_local": dir_valid_tgt_local,
+            "valid_target_count_anchor": dir_valid_tgt_anchor,
+        },
+        "raw_cosine": {
+            "definition": "cos(pred, tgt) over nonzero pairs with ||pred|| > 1e-8 AND ||tgt|| > 1e-8; None if undefined",
+            "local_mean": raw_cos_loc_mean,
+            "anchor_mean": raw_cos_anc_mean,
+            "mean": raw_cos_mean,
+            "valid_both_count_local": len(raw_cos_local),
+            "valid_both_count_anchor": len(raw_cos_anchor),
+            "undefined_count_local": raw_cos_undef_local,
+            "undefined_count_anchor": raw_cos_undef_anchor,
+        },
+        "magnitude_log_ratio_loss": {
+            "definition": "pinned_losses_v3.magnitude_log_ratio_per_sample: |log(max(||pred||, 1e-8)) - log(max(||tgt||, 1e-8))|",
+            "local_mean": float(mag_loc_mean),
+            "anchor_mean": float(mag_anc_mean),
+            "mean": float(0.5 * (mag_loc_mean + mag_anc_mean)),
+        },
+        "norms_and_ratios": {
+            "pred_norm_mean_local": float(sum(pred_norms_local) / len(pred_norms_local)),
+            "pred_norm_mean_anchor": float(sum(pred_norms_anchor) / len(pred_norms_anchor)),
+            "target_norm_mean_local": float(sum(tgt_norms_local) / len(tgt_norms_local)),
+            "target_norm_mean_anchor": float(sum(tgt_norms_anchor) / len(tgt_norms_anchor)),
+            "raw_norm_ratio_mean_local": ratio_loc_mean,
+            "raw_norm_ratio_mean_anchor": ratio_anc_mean,
+            "zero_pred_count_local": zero_pred_local,
+            "zero_pred_count_anchor": zero_pred_anchor,
+            "zero_target_count_local": zero_tgt_local,
+            "zero_target_count_anchor": zero_tgt_anchor,
+            "undefined_ratio_count_local": zero_tgt_local,
+            "undefined_ratio_count_anchor": zero_tgt_anchor,
+        },
         "dev_forward_digests_sha256": digest_chain.hexdigest(),
     }
 
@@ -367,6 +596,7 @@ def evaluate(
     *,
     expected_digests: dict[tuple, str] | None = None,
     forbidden_video_ids: set[str] | None = None,
+    require_external_expectations: bool = False,
 ) -> float:
     return float(
         evaluate_with_diagnostics(
@@ -375,5 +605,124 @@ def evaluate(
             expected,
             expected_digests=expected_digests,
             forbidden_video_ids=forbidden_video_ids,
+            require_external_expectations=require_external_expectations,
         )["macro"]
     )
+
+
+def build_h2_contrast_pairs(rows: list[dict]) -> list[dict]:
+    """Build secondary deferred H2 matched-history contrast pairs (source/design only; NOT run in Stage A)."""
+    if type(rows) is not list:
+        raise ValueError("rows must be a list")
+    pairs: list[dict] = []
+    for row in rows:
+        history = list(row["history"])
+        if len(history) <= 2:
+            continue
+        shortened_history = [history[0], history[-1]]
+        if shortened_history == history:
+            continue
+        id_movi = str(row["id_movi"])
+        labels = list(range(int(row["n"])))
+        current = int(row["current"])
+        for horizon in HORIZON_NAMES:
+            if row.get(horizon) is None:
+                continue
+            target = int(row[horizon])
+            full_item = synthetic_item(id_movi, labels, history, current, target, horizon)
+            short_item = synthetic_item(id_movi, labels, shortened_history, current, target, horizon)
+            pairs.append(
+                {
+                    "id_movi": id_movi,
+                    "horizon": horizon,
+                    "full_item": full_item,
+                    "shortened_item": short_item,
+                }
+            )
+    return pairs
+
+
+def evaluate_h2_contrast(model, contrast_pairs: list[dict]) -> dict:
+    """Prepared deferred secondary H2 contrast (`shortened - full`); NOT invoked on primary checkpoint selection."""
+    import torch
+
+    if not contrast_pairs:
+        raise ValueError("contrast_pairs must contain at least one eligible distinct-history pair")
+    was_training = _assert_uniform_module_mode(model)
+    had_last_sem = hasattr(model, "_last_semantic_context")
+    prev_last_sem = getattr(model, "_last_semantic_context", None)
+    if isinstance(prev_last_sem, torch.Tensor):
+        prev_last_sem = prev_last_sem.detach().clone()
+    pre_state = _model_state_and_grad_digest(model)
+    pre_rng = capture_cpu_rng_snapshot()
+
+    full_by_video: dict[str, list[float]] = {}
+    short_by_video: dict[str, list[float]] = {}
+    eval_exc: Exception | None = None
+    try:
+        model.eval()
+        with torch.no_grad():
+            for entry in contrast_pairs:
+                vid = entry["id_movi"]
+                f_item = entry["full_item"]
+                s_item = entry["shortened_item"]
+                f_kwargs = prepare_verified_forward_call(
+                    f_item,
+                    expected_digest=f_item["forward_input_sha256"],
+                    context="h2_full",
+                    verify_canonical_supervision=True,
+                )
+                s_kwargs = prepare_verified_forward_call(
+                    s_item,
+                    expected_digest=s_item["forward_input_sha256"],
+                    context="h2_shortened",
+                    verify_canonical_supervision=True,
+                )
+                f_out = model.forward(**f_kwargs)
+                s_out = model.forward(**s_kwargs)
+                f_val = float(
+                    LOCAL_WEIGHT
+                    * float(torch.nn.functional.smooth_l1_loss(f_out["delta_local"], f_item["supervision"]["target_delta_local"], beta=BETA).item())
+                    + ANCHOR_WEIGHT
+                    * float(torch.nn.functional.smooth_l1_loss(f_out["delta_anchor"], f_item["supervision"]["target_delta_anchor"], beta=BETA).item())
+                )
+                s_val = float(
+                    LOCAL_WEIGHT
+                    * float(torch.nn.functional.smooth_l1_loss(s_out["delta_local"], s_item["supervision"]["target_delta_local"], beta=BETA).item())
+                    + ANCHOR_WEIGHT
+                    * float(torch.nn.functional.smooth_l1_loss(s_out["delta_anchor"], s_item["supervision"]["target_delta_anchor"], beta=BETA).item())
+                )
+                full_by_video.setdefault(vid, []).append(f_val)
+                short_by_video.setdefault(vid, []).append(s_val)
+    except Exception as exc:
+        eval_exc = exc
+    finally:
+        model.train(was_training)
+        if had_last_sem:
+            model._last_semantic_context = prev_last_sem
+        elif hasattr(model, "_last_semantic_context"):
+            delattr(model, "_last_semantic_context")
+        post_modes = {bool(mod.training) for _, mod in model.named_modules()}
+        mode_ok = (post_modes == {was_training}) if post_modes else (bool(model.training) == was_training)
+        state_ok = _model_state_and_grad_digest(model) == pre_state
+        rng_ok = _rng_snapshots_equal(pre_rng, capture_cpu_rng_snapshot())
+        if not (mode_ok and state_ok and rng_ok):
+            raise EvaluatorMutationError(
+                "H2 contrast evaluation mutated model mode, state, grads, or CPU RNG",
+                mutation_details={"mode_restored": mode_ok, "state_unchanged": state_ok, "rng_unchanged": rng_ok},
+                original_error=None if eval_exc is None else str(eval_exc),
+            ) from eval_exc
+    if eval_exc is not None:
+        raise eval_exc
+
+    vids = sorted(full_by_video.keys())
+    full_macro = sum(sum(full_by_video[v]) / len(full_by_video[v]) for v in vids) / len(vids)
+    short_macro = sum(sum(short_by_video[v]) / len(short_by_video[v]) for v in vids) / len(vids)
+    return {
+        "h2_policy": H2_POLICY,
+        "eligible_video_count": len(vids),
+        "eligible_pair_count": len(contrast_pairs),
+        "full_macro": float(full_macro),
+        "shortened_macro": float(short_macro),
+        "shortened_minus_full": float(short_macro - full_macro),
+    }

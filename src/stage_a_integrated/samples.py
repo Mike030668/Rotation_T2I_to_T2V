@@ -7,7 +7,9 @@ from .forward_binding import (
     REPRESENTATION_FIREWALL,
     WIDTH,
     canonical_forward_kwargs_digest,
+    canonical_supervision_digest,
     expected_synthetic_forward_digest,
+    expected_synthetic_supervision_digest,
     synthetic_image_row_f32,
     synthetic_prior_anchor_f32,
     synthetic_progress_f32,
@@ -115,6 +117,7 @@ def synthetic_item(
 
     forward_input_sha256, frozen_kwargs = canonical_forward_kwargs_digest(kwargs)
     validate_supervision(supervision, forbidden_kwargs=kwargs, frozen_kwargs=frozen_kwargs)
+    supervision_sha256 = canonical_supervision_digest(supervision)
 
     return {
         "id_movi": id_movi,
@@ -128,6 +131,7 @@ def synthetic_item(
         "forward_binding": FORWARD_BINDING_VERSION,
         "representation_firewall": REPRESENTATION_FIREWALL,
         "forward_input_sha256": forward_input_sha256,
+        "supervision_sha256": supervision_sha256,
         "model_kwargs": kwargs,
         "supervision": supervision,
     }
@@ -164,7 +168,7 @@ def inject_target_into_forward_kwargs(item: dict, *, field: str = "current_laten
 
 
 def assert_no_target_leak(item: dict, *, verify_canonical_oracle: bool = True) -> dict:
-    """Verify item forward kwargs match causal oracle and reject target-only influence."""
+    """Verify item forward kwargs & supervision match causal oracle and reject target-only leak."""
     import torch
 
     if item.get("anchor_ordinal") is None or item.get("anchor") is None:
@@ -192,8 +196,20 @@ def assert_no_target_leak(item: dict, *, verify_canonical_oracle: bool = True) -
         item["target"],
         item["horizon"],
     )
-    if verify_canonical_oracle and actual_digest != oracle_digest:
-        raise ValueError("actual model_kwargs digest disagrees with independent causal oracle")
+    actual_sup_digest = canonical_supervision_digest(item["supervision"])
+    oracle_sup_digest = expected_synthetic_supervision_digest(
+        item["id_movi"],
+        item["ids_frames"],
+        item["current"],
+        item["target"],
+    )
+    if verify_canonical_oracle:
+        if actual_digest != oracle_digest:
+            raise ValueError("actual model_kwargs digest disagrees with independent causal oracle")
+        if actual_sup_digest != oracle_sup_digest:
+            raise ValueError("actual supervision digest disagrees with independent target oracle")
+        if "supervision_sha256" in item and item["supervision_sha256"] != oracle_sup_digest:
+            raise ValueError("item supervision_sha256 disagrees with target oracle")
 
     image = _image(item["id_movi"], item["ids_frames"])
     mutated = image.clone()
@@ -217,6 +233,8 @@ def assert_no_target_leak(item: dict, *, verify_canonical_oracle: bool = True) -
     return {
         "actual_digest": actual_digest,
         "oracle_digest": oracle_digest,
+        "actual_supervision_digest": actual_sup_digest,
+        "oracle_supervision_digest": oracle_sup_digest,
         "target_mutation_preserved_digest": True,
     }
 
@@ -261,4 +279,35 @@ def assert_causal_input_sensitivity(item: dict) -> dict:
         "base_digest": base_digest,
         "causal_mutated_digest": changed["forward_input_sha256"],
         "causal_input_kind": causal_kind,
+    }
+
+
+def assert_future_unselected_invariance(item: dict) -> dict:
+    """Verify mutating future unselected frames (> current, != target) alters neither inputs nor targets."""
+    import torch
+
+    unselected_future = [
+        frame for frame in item["ids_frames"] if frame > item["current"] and frame != item["target"]
+    ]
+    if not unselected_future:
+        raise ValueError("item has no future unselected frame beyond current/target")
+
+    image = _image(item["id_movi"], item["ids_frames"])
+    mutated = image.clone()
+    for frame in unselected_future:
+        mutated[item["ids_frames"].index(frame)] += 1.0
+
+    clean = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], image)
+    perturbed = synthetic_item(item["id_movi"], item["ids_frames"], item["history"], item["current"], item["target"], item["horizon"], mutated)
+    if clean["forward_input_sha256"] != perturbed["forward_input_sha256"]:
+        raise ValueError("future unselected frame mutation altered forward_input_sha256")
+    if clean["supervision_sha256"] != perturbed["supervision_sha256"]:
+        raise ValueError("future unselected frame mutation altered supervision_sha256")
+    for sup_key in ("target_delta_local", "target_delta_anchor", "target_latent_proxy"):
+        if not bool(torch.equal(clean["supervision"][sup_key], perturbed["supervision"][sup_key])):
+            raise ValueError(f"future unselected frame mutation altered supervision {sup_key}")
+    return {
+        "unselected_future_frames": unselected_future,
+        "forward_input_sha256": clean["forward_input_sha256"],
+        "supervision_sha256": clean["supervision_sha256"],
     }

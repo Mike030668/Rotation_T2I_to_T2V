@@ -1,4 +1,4 @@
-"""One future-authorized synthetic path. Default CLI still raises."""
+"""Authorized Stage A synthetic spine with external Owner trust, resolved config, and durable dev_report.json."""
 
 from __future__ import annotations
 
@@ -7,18 +7,33 @@ import math
 from pathlib import Path
 
 from . import CANDIDATE_SHA256, HORIZONS_SHA256, LOSS_SHA256, SAMPLER_SHA256
-from .authorization import ExecutionNotAuthorized, load
+from .authorization import (
+    ExecutionNotAuthorized,
+    OWNER_TRUST_STATUS_PENDING,
+    RESUME_POLICY_FRESH,
+    RESUME_POLICY_LAST,
+    canonical_resolved_path,
+    finalize_release_nonce,
+    load,
+    reserve_release_nonce,
+)
 from .checkpoints import (
     CHECKPOINT_SCHEMA_VERSION,
     COMMIT_SCHEMA_VERSION,
     COMMIT_STATE_DURABLE,
     COMMIT_STATE_PRE_COMMIT_FAILURE,
     COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
+    DEV_METRIC_ID,
+    DEV_METRIC_STATUS,
+    DEV_METRIC_VERSION,
+    DEV_REPORT_SCHEMA_VERSION,
     EXPECTED_ADAMW_AMSGRAD,
     EXPECTED_ADAMW_BETAS,
     EXPECTED_ADAMW_EPS,
     EXPECTED_ADAMW_LR,
     EXPECTED_ADAMW_WEIGHT_DECAY,
+    MANIFEST_SCHEMA_VERSION,
+    MAX_DEV_REPORT_BYTES,
     MAX_HORIZONS_FILE_BYTES,
     MAX_RNG_SECTION_BYTES,
     OWNER_TRUST_ROOT_STATUS,
@@ -35,6 +50,7 @@ from .checkpoints import (
     file_sha256,
     pack,
     recover_commit_state,
+    resolve_commit,
     resolve_pointer,
     restore_cpu_rng_snapshot,
     stage_adamw_state,
@@ -50,7 +66,25 @@ from .checkpoints import (
     verify_checkpoint_provenance,
     write_failure_receipt,
 )
-from .dev import METRIC_STATUS as DEV_METRIC_STATUS, evaluate, expected_dev_digests, load_keys, load_rows
+from .dev import (
+    ANCHOR_WEIGHT,
+    BETA,
+    DIAGNOSTICS_POLICY,
+    H2_POLICY,
+    LOCAL_WEIGHT,
+    METRIC_AGGREGATION,
+    METRIC_DIRECTION,
+    METRIC_EPSILON,
+    METRIC_NAME,
+    METRIC_STATUS as DEV_METRIC_STATUS_VAL,
+    METRIC_TIE_POLICY,
+    METRIC_VERSION,
+    EvaluatorMutationError,
+    evaluate_with_diagnostics,
+    expected_dev_digests,
+    load_keys,
+    load_rows,
+)
 from .exposure import (
     FORWARD_BINDING,
     MAX_SEED,
@@ -65,6 +99,7 @@ from .exposure import (
 from .forward_binding import REPRESENTATION_FIREWALL
 from .model_adapter import load_class
 from .plan import (
+    DEV_TEMPORAL_AXIS_SEMANTICS,
     REMAINDER_POLICY,
     SYNTHETIC_SOURCE_ID,
     SYNTHETIC_TRAIN_IDS_SHA256,
@@ -78,6 +113,71 @@ from .plan import (
     verify_train_ids_pin,
 )
 from .trainer import optimizer_step
+
+CONFIG_SCHEMA_VERSION = "stage-a-config-v1"
+TRAIN_TEMPORAL_AXIS_SEMANTICS = "SYNTHETIC_PINNED_LABELS_0_2_9_10_40"
+
+REQUIRED_CONFIG_KEYS = frozenset(
+    {
+        "schema",
+        "package",
+        "data",
+        "scope",
+        "device",
+        "budget",
+        "max_updates",
+        "batch",
+        "seed",
+        "dev_events",
+        "clip",
+        "horizons_path",
+        "output_root",
+        "trust_anchor_path",
+        "revocation_path",
+        "nonce_ledger_path",
+        "candidate_sha256",
+        "loss_sha256",
+        "horizons_sha256",
+        "sampler_sha256",
+        "exposure_schema",
+        "sampler_schema",
+        "checkpoint_schema",
+        "provenance_schema",
+        "manifest_schema",
+        "pointer_schema",
+        "commit_schema",
+        "dev_report_schema",
+        "rng_scope",
+        "optimizer",
+        "lr",
+        "weight_decay",
+        "betas",
+        "eps",
+        "amsgrad",
+        "synthetic_source_id",
+        "synthetic_train_size",
+        "synthetic_train_ids_sha256",
+        "synthetic_remainder_policy",
+        "forward_binding",
+        "representation_firewall",
+        "train_temporal_axis_semantics",
+        "dev_temporal_axis_semantics",
+        "dev_metric_id",
+        "dev_metric_version",
+        "dev_metric_status",
+        "dev_metric_beta",
+        "dev_metric_local_weight",
+        "dev_metric_anchor_weight",
+        "dev_metric_aggregation",
+        "dev_metric_direction",
+        "dev_metric_tie_policy",
+        "dev_metric_epsilon",
+        "dev_diagnostics_policy",
+        "dev_h2_policy",
+        "release_created",
+    }
+)
+OPTIONAL_RUNTIME_CONFIG_KEYS = frozenset({"status", "owner_trust_root_status", "resume_role", "resume_bytes"})
 
 
 def _require_finite_config_number(value: object, name: str) -> float:
@@ -106,54 +206,80 @@ def _safe_write_failure_receipt(
         return None
 
 
-def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]:
+def resolve_effective_config(config: dict) -> dict:
+    """Strictly validate full `stage-a-config-v1` without fallback defaults or unprovisioned sentinels."""
     if type(config) is not dict:
         raise ValueError("config must be a dict")
-    max_updates = require_exact_int(config.get("max_updates"), "config.max_updates", minimum=1)
-    batch_size = require_exact_int(config.get("batch"), "config.batch", minimum=1, maximum=SYNTHETIC_TRAIN_SIZE)
-    seed = require_exact_int(config.get("seed"), "config.seed", minimum=0, maximum=MAX_SEED)
-    raw_events = config.get("dev_events")
+    allowed = REQUIRED_CONFIG_KEYS | OPTIONAL_RUNTIME_CONFIG_KEYS
+    unknown = sorted(set(config.keys()) - allowed)
+    if unknown:
+        raise ValueError(f"unexpected config keys rejected: {unknown}")
+    missing = sorted(REQUIRED_CONFIG_KEYS - set(config.keys()))
+    if missing:
+        raise ValueError(f"config missing required stage-a-config-v1 keys: {missing}")
+
+    if config["schema"] != CONFIG_SCHEMA_VERSION:
+        raise ValueError("config.schema must be stage-a-config-v1")
+    if config["package"] != "stage_a_integrated" or config["data"] != "synthetic":
+        raise ValueError("config.package or config.data mismatch")
+    if config["scope"] != "stage_a_synthetic_preflight" or config["device"] != "cpu":
+        raise ValueError("config.scope or config.device mismatch")
+    budget = config["budget"]
+    if type(budget) is not str or not budget or budget != budget.strip():
+        raise ValueError("config.budget must be a trimmed nonempty string")
+    if config["release_created"] is not False:
+        raise ValueError("config.release_created must be false")
+    if "owner_trust_root_status" in config and config["owner_trust_root_status"] != OWNER_TRUST_STATUS_PENDING:
+        raise ValueError("config.owner_trust_root_status must be PENDING_OWNER_C4")
+
+    max_updates = require_exact_int(config["max_updates"], "config.max_updates", minimum=1)
+    batch_size = require_exact_int(config["batch"], "config.batch", minimum=1, maximum=SYNTHETIC_TRAIN_SIZE)
+    seed = require_exact_int(config["seed"], "config.seed", minimum=0, maximum=MAX_SEED)
+    raw_events = config["dev_events"]
     if (
         type(raw_events) is not list
+        or not raw_events
         or any(type(event) is not int or event < 1 for event in raw_events)
         or raw_events != sorted(set(raw_events))
     ):
-        raise ValueError("config.dev_events must be a strictly increasing list of positive exact ints")
+        raise ValueError("config.dev_events must be a nonempty strictly increasing list of positive exact ints")
     dev_events = list(raw_events)
-    raw_clip = config.get("clip")
-    if (
-        type(raw_clip) not in (int, float)
-        or isinstance(raw_clip, bool)
-        or not math.isfinite(float(raw_clip))
-        or float(raw_clip) <= 0.0
-    ):
-        raise ValueError("config.clip must be a finite positive number")
-    clip = float(raw_clip)
-    if type(config.get("horizons_path")) is not str or not config["horizons_path"]:
-        raise ValueError("config.horizons_path must be a nonempty string")
-    if "release_created" in config and config["release_created"] is not False:
-        raise ValueError("config.release_created must be false")
-    if "amsgrad" in config and config["amsgrad"] is not EXPECTED_ADAMW_AMSGRAD:
-        raise ValueError("config.amsgrad does not match pinned C2-AMENDMENT-01 contract")
-    if "lr" in config and _require_finite_config_number(config["lr"], "config.lr") != EXPECTED_ADAMW_LR:
-        raise ValueError("config.lr does not match pinned C2-AMENDMENT-01 contract")
-    if (
-        "weight_decay" in config
-        and _require_finite_config_number(config["weight_decay"], "config.weight_decay") != EXPECTED_ADAMW_WEIGHT_DECAY
-    ):
-        raise ValueError("config.weight_decay does not match pinned C2-AMENDMENT-01 contract")
-    if "eps" in config and _require_finite_config_number(config["eps"], "config.eps") != EXPECTED_ADAMW_EPS:
-        raise ValueError("config.eps does not match pinned C2-AMENDMENT-01 contract")
-    if "betas" in config:
-        raw_betas = config["betas"]
-        if type(raw_betas) not in (list, tuple) or len(raw_betas) != 2:
-            raise ValueError("config.betas must be a 2-element list/tuple")
-        betas = (
-            _require_finite_config_number(raw_betas[0], "config.betas[0]"),
-            _require_finite_config_number(raw_betas[1], "config.betas[1]"),
-        )
-        if betas != EXPECTED_ADAMW_BETAS:
-            raise ValueError("config.betas does not match pinned C2-AMENDMENT-01 contract")
+    clip = _require_finite_config_number(config["clip"], "config.clip")
+    if clip <= 0.0:
+        raise ValueError("config.clip must be strictly positive")
+
+    horizons_path = canonical_resolved_path(config["horizons_path"], "config.horizons_path")
+    output_root = canonical_resolved_path(config["output_root"], "config.output_root")
+    trust_anchor_path = canonical_resolved_path(config["trust_anchor_path"], "config.trust_anchor_path")
+    revocation_path = canonical_resolved_path(config["revocation_path"], "config.revocation_path")
+    nonce_ledger_path = canonical_resolved_path(config["nonce_ledger_path"], "config.nonce_ledger_path")
+
+    if config["amsgrad"] is not EXPECTED_ADAMW_AMSGRAD:
+        raise ValueError("config.amsgrad does not match pinned contract")
+    if _require_finite_config_number(config["lr"], "config.lr") != EXPECTED_ADAMW_LR:
+        raise ValueError("config.lr does not match pinned contract")
+    if _require_finite_config_number(config["weight_decay"], "config.weight_decay") != EXPECTED_ADAMW_WEIGHT_DECAY:
+        raise ValueError("config.weight_decay does not match pinned contract")
+    if _require_finite_config_number(config["eps"], "config.eps") != EXPECTED_ADAMW_EPS:
+        raise ValueError("config.eps does not match pinned contract")
+    raw_betas = config["betas"]
+    if type(raw_betas) not in (list, tuple) or len(raw_betas) != 2:
+        raise ValueError("config.betas must be a 2-element list/tuple")
+    betas = (
+        _require_finite_config_number(raw_betas[0], "config.betas[0]"),
+        _require_finite_config_number(raw_betas[1], "config.betas[1]"),
+    )
+    if betas != EXPECTED_ADAMW_BETAS:
+        raise ValueError("config.betas does not match pinned contract")
+
+    if _require_finite_config_number(config["dev_metric_beta"], "config.dev_metric_beta") != BETA:
+        raise ValueError("config.dev_metric_beta must equal 0.05")
+    if _require_finite_config_number(config["dev_metric_local_weight"], "config.dev_metric_local_weight") != LOCAL_WEIGHT:
+        raise ValueError("config.dev_metric_local_weight must equal 0.5")
+    if _require_finite_config_number(config["dev_metric_anchor_weight"], "config.dev_metric_anchor_weight") != ANCHOR_WEIGHT:
+        raise ValueError("config.dev_metric_anchor_weight must equal 0.5")
+    if _require_finite_config_number(config["dev_metric_epsilon"], "config.dev_metric_epsilon") != METRIC_EPSILON:
+        raise ValueError("config.dev_metric_epsilon must equal 0.0")
 
     pin_checks = {
         "candidate_sha256": CANDIDATE_SHA256,
@@ -164,40 +290,54 @@ def _validate_run_config(config: dict) -> tuple[int, int, int, list[int], float]
         "sampler_schema": SAMPLER_SCHEMA_VERSION,
         "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
         "commit_schema": COMMIT_SCHEMA_VERSION,
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
         "rng_scope": RNG_SCOPE,
         "optimizer": "AdamW",
-        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
         "synthetic_source_id": SYNTHETIC_SOURCE_ID,
         "synthetic_train_size": SYNTHETIC_TRAIN_SIZE,
         "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "synthetic_remainder_policy": REMAINDER_POLICY,
         "forward_binding": FORWARD_BINDING,
         "representation_firewall": REPRESENTATION_FIREWALL,
-        "dev_metric_status": DEV_METRIC_STATUS,
+        "train_temporal_axis_semantics": TRAIN_TEMPORAL_AXIS_SEMANTICS,
+        "dev_temporal_axis_semantics": DEV_TEMPORAL_AXIS_SEMANTICS,
+        "dev_metric_id": METRIC_NAME,
+        "dev_metric_version": METRIC_VERSION,
+        "dev_metric_status": DEV_METRIC_STATUS_VAL,
+        "dev_metric_aggregation": METRIC_AGGREGATION,
+        "dev_metric_direction": METRIC_DIRECTION,
+        "dev_metric_tie_policy": METRIC_TIE_POLICY,
+        "dev_diagnostics_policy": DIAGNOSTICS_POLICY,
+        "dev_h2_policy": H2_POLICY,
     }
     for key, expected_val in pin_checks.items():
-        if key in config and config[key] != expected_val:
-            raise ValueError(f"config.{key} does not match pinned Stage A contract")
-    return max_updates, batch_size, seed, dev_events, clip
+        if config[key] != expected_val:
+            raise ValueError(f"config.{key} does not match pinned Stage A C4 contract")
 
+    horizons_file_sha256 = file_sha256(Path(horizons_path), max_bytes=MAX_HORIZONS_FILE_BYTES)
+    if horizons_file_sha256 != HORIZONS_SHA256:
+        raise ValueError("horizons file sha256 does not match pinned HORIZONS_SHA256")
 
-def _canonical_effective_config_bytes(
-    *,
-    max_updates: int,
-    batch_size: int,
-    seed: int,
-    dev_events: list[int],
-    clip: float,
-    horizons_file_sha256: str,
-) -> bytes:
     effective = {
+        "schema": CONFIG_SCHEMA_VERSION,
+        "package": "stage_a_integrated",
+        "data": "synthetic",
+        "scope": "stage_a_synthetic_preflight",
+        "device": "cpu",
+        "budget": budget,
         "max_updates": max_updates,
         "batch": batch_size,
         "seed": seed,
         "dev_events": list(dev_events),
         "clip": clip,
+        "horizons_path": horizons_path,
+        "output_root": output_root,
+        "trust_anchor_path": trust_anchor_path,
+        "revocation_path": revocation_path,
+        "nonce_ledger_path": nonce_ledger_path,
         "candidate_sha256": CANDIDATE_SHA256,
         "loss_sha256": LOSS_SHA256,
         "horizons_sha256": HORIZONS_SHA256,
@@ -207,8 +347,10 @@ def _canonical_effective_config_bytes(
         "sampler_schema": SAMPLER_SCHEMA_VERSION,
         "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
         "commit_schema": COMMIT_SCHEMA_VERSION,
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
         "rng_scope": RNG_SCOPE,
         "optimizer": "AdamW",
         "lr": EXPECTED_ADAMW_LR,
@@ -216,17 +358,32 @@ def _canonical_effective_config_bytes(
         "betas": list(EXPECTED_ADAMW_BETAS),
         "eps": EXPECTED_ADAMW_EPS,
         "amsgrad": EXPECTED_ADAMW_AMSGRAD,
-        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
         "synthetic_source_id": SYNTHETIC_SOURCE_ID,
         "synthetic_train_size": SYNTHETIC_TRAIN_SIZE,
         "synthetic_train_ids_sha256": SYNTHETIC_TRAIN_IDS_SHA256,
         "synthetic_remainder_policy": REMAINDER_POLICY,
         "forward_binding": FORWARD_BINDING,
         "representation_firewall": REPRESENTATION_FIREWALL,
+        "train_temporal_axis_semantics": TRAIN_TEMPORAL_AXIS_SEMANTICS,
+        "dev_temporal_axis_semantics": DEV_TEMPORAL_AXIS_SEMANTICS,
+        "dev_metric_id": DEV_METRIC_ID,
+        "dev_metric_version": DEV_METRIC_VERSION,
         "dev_metric_status": DEV_METRIC_STATUS,
+        "dev_metric_beta": BETA,
+        "dev_metric_local_weight": LOCAL_WEIGHT,
+        "dev_metric_anchor_weight": ANCHOR_WEIGHT,
+        "dev_metric_aggregation": METRIC_AGGREGATION,
+        "dev_metric_direction": METRIC_DIRECTION,
+        "dev_metric_tie_policy": METRIC_TIE_POLICY,
+        "dev_metric_epsilon": METRIC_EPSILON,
+        "dev_diagnostics_policy": DIAGNOSTICS_POLICY,
+        "dev_h2_policy": H2_POLICY,
         "release_created": False,
     }
-    return canonical_json_bytes(effective, max_bytes=65536)
+    effective_config_bytes = canonical_json_bytes(effective, max_bytes=65536)
+    effective["effective_config_bytes"] = effective_config_bytes
+    effective["effective_config_sha256"] = hashlib.sha256(effective_config_bytes).hexdigest()
+    return effective
 
 
 def _preflight_and_reconcile(payload: bytes, expected_config: dict) -> dict:
@@ -276,377 +433,160 @@ def _preflight_and_reconcile(payload: bytes, expected_config: dict) -> dict:
     }
 
 
-def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, config: dict) -> dict:
-    release = load(release_path, trust_anchor_path, expected)
-    if release.get("scope") != "stage_a_synthetic_preflight":
-        raise ExecutionNotAuthorized("scope is not the synthetic preflight")
-    max_updates, batch_size, seed, dev_events, clip = _validate_run_config(config)
-    if max_updates > int(release.get("max_updates")):
-        raise ExecutionNotAuthorized("config exceeds the released budget")
-    sampler_digest = verify_sampler_pin()
-    source_digest = verify_train_ids_pin(train_ids())
-    root = Path(release.get("output_root"))
-    horizons_path = Path(config["horizons_path"])
-    horizons_file_sha256 = file_sha256(horizons_path, max_bytes=MAX_HORIZONS_FILE_BYTES)
-    if horizons_file_sha256 != HORIZONS_SHA256:
-        raise ValueError("horizons file sha256 does not match pinned HORIZONS_SHA256")
-    effective_config_bytes = _canonical_effective_config_bytes(
-        max_updates=max_updates,
-        batch_size=batch_size,
-        seed=seed,
-        dev_events=dev_events,
-        clip=clip,
-        horizons_file_sha256=horizons_file_sha256,
-    )
-    base_provenance = build_expected_provenance(
-        effective_config_bytes,
-        horizons_path,
-        generation_id=None,
-        horizons_file_sha256=horizons_file_sha256,
-    )
+def _sync_expected_with_config(expected: dict, resolved: dict, *, resume_policy: str, resume_from_commit_sha256: str | None) -> dict:
+    if type(expected) is not dict:
+        raise ExecutionNotAuthorized("expected verification parameters must be a dict")
+    verified = dict(expected)
+    for key in ("scope", "device", "budget", "max_updates"):
+        if verified.get(key) != resolved[key]:
+            raise ExecutionNotAuthorized(f"expected.{key} disagrees with resolved effective config")
+    if "output_root" in verified and canonical_resolved_path(verified["output_root"], "expected.output_root") != resolved["output_root"]:
+        raise ExecutionNotAuthorized("expected.output_root disagrees with resolved effective config")
+    verified["output_root"] = resolved["output_root"]
+    if "revocation_path" in verified and canonical_resolved_path(verified["revocation_path"], "expected.revocation_path") != resolved["revocation_path"]:
+        raise ExecutionNotAuthorized("expected.revocation_path disagrees with resolved effective config")
+    verified["revocation_path"] = resolved["revocation_path"]
+    if "nonce_ledger_path" in verified and canonical_resolved_path(verified["nonce_ledger_path"], "expected.nonce_ledger_path") != resolved["nonce_ledger_path"]:
+        raise ExecutionNotAuthorized("expected.nonce_ledger_path disagrees with resolved effective config")
+    if "effective_config_sha256" in verified and verified["effective_config_sha256"] != resolved["effective_config_sha256"]:
+        raise ExecutionNotAuthorized("expected.effective_config_sha256 disagrees with resolved effective config")
+    verified["effective_config_sha256"] = resolved["effective_config_sha256"]
+    if "resume_policy" in verified and verified["resume_policy"] != resume_policy:
+        raise ExecutionNotAuthorized("expected.resume_policy disagrees with run resume mode")
+    verified["resume_policy"] = resume_policy
+    if "resume_from_commit_sha256" in verified and verified["resume_from_commit_sha256"] != resume_from_commit_sha256:
+        raise ExecutionNotAuthorized("expected.resume_from_commit_sha256 disagrees with committed LAST")
+    verified["resume_from_commit_sha256"] = resume_from_commit_sha256
+    return verified
 
+
+def run_synthetic(
+    release_path: str,
+    trust_anchor_path: str,
+    expected: dict,
+    config: dict,
+    *,
+    allow_synthetic_test_trust: bool = False,
+) -> dict:
+    resolved = resolve_effective_config(config)
+    if canonical_resolved_path(trust_anchor_path, "trust_anchor_path") != resolved["trust_anchor_path"]:
+        raise ExecutionNotAuthorized("trust_anchor_path disagrees with resolved effective config")
+
+    root = Path(resolved["output_root"])
     has_resume_bytes = config.get("resume_bytes") is not None
     has_resume_role = config.get("resume_role") is not None
     if has_resume_bytes and has_resume_role:
         raise ValueError("config cannot specify both resume_bytes and resume_role")
 
-    resume_payload: bytes | None = None
-    expected_resume_cfg = {
-        "seed": seed,
-        "batch": batch_size,
-        "source_id": SYNTHETIC_SOURCE_ID,
-        "source_sha256": source_digest,
-        "sampler_sha256": sampler_digest,
-        "expected_provenance": base_provenance,
-        "dev_events": dev_events,
-    }
-    if has_resume_bytes or has_resume_role:
-        try:
-            if has_resume_role:
-                role = config["resume_role"]
-                if role == "BEST":
-                    raise ValueError(
-                        "BEST is a read-only selection/evaluation artifact; canonical continuation requires resume_role='LAST'"
-                    )
-                if role != "LAST":
-                    raise ValueError("resume_role must be 'LAST' for canonical continuation")
-                recovery = recover_commit_state(
-                    root,
-                    expected_provenance=base_provenance,
-                    expected_dev_events=dev_events,
+    commit_path = root / "CURRENT_COMMIT"
+    if has_resume_role or has_resume_bytes:
+        if has_resume_role:
+            role = config["resume_role"]
+            if role == "BEST":
+                raise ValueError(
+                    "BEST is a read-only selection/evaluation artifact; canonical continuation requires resume_role='LAST'"
                 )
-                if not recovery["committed"]:
-                    raise ValueError("cannot resume LAST from an uncommitted root")
-                resolved = resolve_pointer(
-                    root,
-                    "LAST",
-                    expected_provenance=base_provenance,
-                    expected_dev_events=dev_events,
-                )
-                resume_payload = resolved["payload"]
-            else:
-                raw_resume = config["resume_bytes"]
-                if type(raw_resume) is not bytes:
-                    raise ValueError("config.resume_bytes must be bytes")
-                recovery = recover_commit_state(
-                    root,
-                    expected_provenance=base_provenance,
-                    expected_dev_events=dev_events,
-                )
-                if not recovery["committed"]:
-                    raise ValueError(
-                        "raw resume_bytes is rejected for canonical continuation in an uncommitted root; "
-                        "use spine.resume() for isolated non-publishing staging"
-                    )
-                resolved = resolve_pointer(
-                    root,
-                    "LAST",
-                    expected_provenance=base_provenance,
-                    expected_dev_events=dev_events,
-                )
-                if (
-                    hashlib.sha256(raw_resume).hexdigest() != resolved["pointer"]["checkpoint_sha256"]
-                    or raw_resume != resolved["payload"]
-                ):
-                    raise ValueError("resume_bytes does not match authoritative committed LAST")
-                resume_payload = raw_resume
-            preflight = _preflight_and_reconcile(resume_payload, expected_resume_cfg)
-            if int(preflight["reconciled"]["final_state"]["completed"]) > max_updates:
-                raise ValueError("checkpoint completed step exceeds config.max_updates")
-        except CommitDurabilityUnknownError as exc:
-            _safe_write_failure_receipt(
-                root,
-                "commit_durability_unknown",
-                str(exc),
-                generation_id=exc.generation_id,
-                details={
-                    "phase": "resume_preflight",
-                    "commit_state": COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
-                    "commit_visible": True,
-                    "commit_durable": False,
-                    "commit_sha256": exc.commit_sha256,
-                    "must_fail_stop": True,
-                },
-            )
-            raise
-        except PostCommitError as exc:
-            _safe_write_failure_receipt(
-                root,
-                "post_commit_failure",
-                str(exc),
-                generation_id=exc.generation_id,
-                details={
-                    "phase": "resume_preflight",
-                    "commit_state": COMMIT_STATE_DURABLE,
-                    "commit_visible": True,
-                    "commit_durable": True,
-                    "post_commit_phase": exc.phase,
-                    "commit_sha256": exc.commit_sha256,
-                },
-            )
-            raise
-        except Exception as exc:
-            raw_role = config.get("resume_role")
-            _safe_write_failure_receipt(
-                root,
-                "resume_preflight",
-                str(exc),
-                details={"resume_role": raw_role if type(raw_role) in (str, type(None)) else repr(raw_role)},
-            )
-            raise
-    elif (root / "CURRENT_COMMIT").exists():
-        _safe_write_failure_receipt(
-            root,
-            "resume_preflight",
-            "cannot start unresumed training in an already-committed root; specify resume_role='LAST'",
-            details={"resume_role": None},
-        )
-        raise ValueError("cannot start unresumed training in an already-committed root; specify resume_role='LAST'")
+            if role != "LAST":
+                raise ValueError("resume_role must be 'LAST' for canonical continuation")
+        if not commit_path.is_file():
+            raise ValueError("cannot resume LAST from an uncommitted root")
+        resume_from_commit_sha256 = file_sha256(commit_path, max_bytes=131072)
+        resume_policy = RESUME_POLICY_LAST
+    else:
+        if commit_path.exists():
+            raise ValueError("cannot start unresumed training in an already-committed root; specify resume_role='LAST'")
+        resume_from_commit_sha256 = None
+        resume_policy = RESUME_POLICY_FRESH
 
-    import torch
+    verified_expected = _sync_expected_with_config(
+        expected,
+        resolved,
+        resume_policy=resume_policy,
+        resume_from_commit_sha256=resume_from_commit_sha256,
+    )
+    release = load(
+        release_path,
+        trust_anchor_path,
+        verified_expected,
+        revocation_path=resolved["revocation_path"],
+        allow_synthetic_test_trust=allow_synthetic_test_trust,
+    )
+    ledger_path = Path(resolved["nonce_ledger_path"])
+    reserve_release_nonce(ledger_path, release, now=verified_expected["now"])
 
-    caller_rng_snapshot: tuple | None = None
-    if resume_payload is not None:
-        try:
-            caller_rng_snapshot = capture_cpu_rng_snapshot()
-        except Exception as exc:
-            _safe_write_failure_receipt(
-                root,
-                "resume_snapshot",
-                str(exc),
-                details={"phase": "caller_rng_snapshot", "rollback_attempted": False, "fail_stop": True},
-            )
-            raise
+    run_succeeded = False
+    final_commit_sha256: str | None = resume_from_commit_sha256
     try:
-        model_cls, config_cls = load_class()
-        model = model_cls(config_cls())
-        opt = torch.optim.AdamW(
-            model.parameters(),
-            lr=EXPECTED_ADAMW_LR,
-            weight_decay=EXPECTED_ADAMW_WEIGHT_DECAY,
-            betas=EXPECTED_ADAMW_BETAS,
-            eps=EXPECTED_ADAMW_EPS,
-            amsgrad=EXPECTED_ADAMW_AMSGRAD,
-        )
-        rows = load_rows(horizons_path)
-        keys = load_keys(horizons_path)
-        dev_expected_digests = expected_dev_digests(rows)
-    except Exception as exc:
-        if caller_rng_snapshot is not None:
-            rb_errors = restore_cpu_rng_snapshot(caller_rng_snapshot)
-            if rb_errors:
-                _safe_write_failure_receipt(
-                    root,
-                    "fatal_rollback",
-                    "RNG rollback failed after pre-resume setup failure",
-                    details={
-                        "original_error": str(exc),
-                        "rollback_errors": rb_errors,
-                        "fatal": True,
-                        "must_terminate_process": True,
-                    },
-                )
-                raise FatalRollbackError(
-                    "fatal pre-resume RNG rollback failure",
-                    original_error=str(exc),
-                    rollback_errors=rb_errors,
-                ) from exc
-            _safe_write_failure_receipt(
-                root,
-                "resume_stage",
-                str(exc),
-                details={"phase": "pre_resume_setup", "rollback_succeeded": True, "fail_stop": True},
-            )
-        raise
+        max_updates = resolved["max_updates"]
+        batch_size = resolved["batch"]
+        seed = resolved["seed"]
+        dev_events = resolved["dev_events"]
+        clip = resolved["clip"]
+        effective_config_bytes = resolved["effective_config_bytes"]
+        horizons_path = Path(resolved["horizons_path"])
+        horizons_file_sha256 = resolved["horizons_file_sha256"]
+        sampler_digest = verify_sampler_pin()
+        train_id_list = train_ids()
+        source_digest = verify_train_ids_pin(train_id_list)
+        train_id_set = set(train_id_list)
 
-    completed = 0
-    epoch = 0
-    cursor = 0
-    last_cursor_before: int | None = None
-    last_receipt_sha256: str | None = None
-    best = None
-    best_history: list[dict] = []
-    macros = {}
-    events = []
-    exposure_frames: list[bytes] = []
-    if resume_payload is not None:
-        restored = resume(
-            resume_payload,
-            model,
-            opt,
-            expected_resume_cfg,
-            failure_root=root,
-            caller_rng_snapshot=caller_rng_snapshot,
+        base_provenance = build_expected_provenance(
+            effective_config_bytes,
+            horizons_path,
+            owner_trust_anchor_sha256=release.trust_anchor_sha256,
+            owner_trust_root_status=release.trust_status,
+            generation_id=None,
+            horizons_file_sha256=horizons_file_sha256,
         )
-        completed = int(restored["completed"])
-        epoch = int(restored["epoch"])
-        cursor = int(restored["cursor"])
-        last_cursor_before = restored["last_cursor_before"]
-        last_receipt_sha256 = restored["last_receipt_sha256"]
-        best = restored["best"]
-        best_history = [dict(item) for item in restored["best_history"]]
-        events = [int(event) for event in restored["events"]]
-        macros = {int(step): float(value) for step, value in restored["macros"].items()}
-        exposure_frames = list(restored["exposure_frames"])
 
-    items = dev_items(rows)
-    while completed < max_updates:
-        step_epoch, cursor_before, expected_cursor_after = advance_window(epoch, cursor, batch_size)
-        batch, cursor_after, chosen = next_batch(seed, step_epoch, cursor_before, batch_size)
-        if cursor_after != expected_cursor_after:
-            raise ValueError("next_batch cursor_after mismatch")
-        completed_next = completed + 1
-        proposed_bytes = build_receipt_bytes(
-            batch,
-            completed_next,
-            step_epoch,
-            cursor_before,
-            cursor_after,
-            seed,
-            batch_size,
-        )
-        record, frozen_bytes = require_record(
-            proposed_bytes,
-            completed_next,
-            expected_seed=seed,
-            expected_batch=batch_size,
-            expected_epoch=step_epoch,
-            expected_cursor_before=cursor_before,
-            expected_cursor_after=cursor_after,
-            expected_source_id=SYNTHETIC_SOURCE_ID,
-            expected_source_sha256=source_digest,
-            expected_sampler_sha256=sampler_digest,
-        )
-        if record["videos"] != chosen:
-            raise ValueError("receipt videos do not match next_batch selection")
-        step_inc = optimizer_step(
-            model,
-            batch,
-            opt,
-            clip,
-            expected_forward_digests=record["forward_input_sha256"],
-        )
-        if step_inc != 1:
-            raise ValueError("optimizer_step did not complete one update")
-        completed += step_inc
-        epoch = step_epoch
-        cursor = cursor_after
-        last_cursor_before = cursor_before
-        last_receipt_sha256 = record["receipt_sha256"]
-        exposure_frames.append(frozen_bytes)
-        if completed in dev_events:
-            generation_id = f"u{completed}"
+        resume_payload: bytes | None = None
+        expected_resume_cfg = {
+            "seed": seed,
+            "batch": batch_size,
+            "source_id": SYNTHETIC_SOURCE_ID,
+            "source_sha256": source_digest,
+            "sampler_sha256": sampler_digest,
+            "expected_provenance": base_provenance,
+            "dev_events": dev_events,
+        }
+        if has_resume_bytes or has_resume_role:
             try:
-                value = evaluate(model, items, keys, expected_digests=dev_expected_digests)
-            except Exception as exc:
-                _safe_write_failure_receipt(
+                recovery = recover_commit_state(
                     root,
-                    "dev_eval_failure",
-                    str(exc),
-                    generation_id=generation_id,
-                    details={"completed": completed},
-                )
-                raise
-            finally:
-                model.train()
-            if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
-                _safe_write_failure_receipt(
-                    root,
-                    "dev_nonfinite",
-                    f"nonfinite DEV metric at {generation_id}",
-                    generation_id=generation_id,
-                    details={"completed": completed, "value": repr(value)},
-                )
-                raise ValueError(f"nonfinite DEV metric at step {completed}")
-            value = float(value)
-            next_macros = dict(macros)
-            next_macros[completed] = value
-            is_new_best = best is None or value < best[1]
-            next_best = (completed, value) if is_new_best else best
-            next_best_history = (
-                best_history + [{"step": completed, "macro": value}] if is_new_best else list(best_history)
-            )
-            next_events = list(events) + [completed]
-
-            exposure_journal_bytes = b"[" + b",".join(exposure_frames) + b"]"
-            exposure_journal_sha256 = hashlib.sha256(exposure_journal_bytes).hexdigest()
-            sampler_bytes = build_sampler_section_bytes(
-                completed=completed,
-                epoch=epoch,
-                cursor=cursor,
-                last_cursor_before=last_cursor_before,
-                seed=seed,
-                batch_size=batch_size,
-                exposure_journal_bytes=exposure_journal_bytes,
-                last_receipt_sha256=last_receipt_sha256,
-            )
-            step_provenance = build_expected_provenance(
-                effective_config_bytes,
-                horizons_path,
-                generation_id=generation_id,
-                horizons_file_sha256=horizons_file_sha256,
-            )
-            payload = pack(
-                {
-                    "completed": completed,
-                    "epoch": epoch,
-                    "cursor": cursor,
-                    "seed": seed,
-                    "batch_size": batch_size,
-                    "source_id": SYNTHETIC_SOURCE_ID,
-                    "source_sha256": source_digest,
-                    "sampler_sha256": sampler_digest,
-                    "exposure_schema": SCHEMA_VERSION,
-                    "exposure_journal_sha256": exposure_journal_sha256,
-                    "last_receipt_sha256": last_receipt_sha256,
-                    "provenance": step_provenance,
-                    "macro": value,
-                    "best_step": next_best[0],
-                    "best_macro": next_best[1],
-                    "best_history": next_best_history,
-                    "events": next_events,
-                    "macros": {str(step): metric for step, metric in next_macros.items()},
-                },
-                _sections(model, opt, sampler_bytes, exposure_journal_bytes),
-            )
-            try:
-                _admit(unpack(payload), dev_events)
-                commit_event(
-                    root,
-                    generation_id,
-                    payload,
-                    is_new_best=is_new_best,
-                    expected_provenance=step_provenance,
+                    expected_provenance=base_provenance,
                     expected_dev_events=dev_events,
                 )
+                if not recovery["committed"] or recovery["commit_sha256"] != resume_from_commit_sha256:
+                    raise ValueError("recovered committed LAST disagrees with authorized resume_from_commit_sha256")
+                resolved_ptr = resolve_pointer(
+                    root,
+                    "LAST",
+                    expected_provenance=base_provenance,
+                    expected_dev_events=dev_events,
+                )
+                if has_resume_role:
+                    resume_payload = resolved_ptr["payload"]
+                else:
+                    raw_resume = config["resume_bytes"]
+                    if type(raw_resume) is not bytes:
+                        raise ValueError("config.resume_bytes must be bytes")
+                    if (
+                        hashlib.sha256(raw_resume).hexdigest() != resolved_ptr["pointer"]["checkpoint_sha256"]
+                        or raw_resume != resolved_ptr["payload"]
+                    ):
+                        raise ValueError("resume_bytes does not match authoritative committed LAST")
+                    resume_payload = raw_resume
+                preflight = _preflight_and_reconcile(resume_payload, expected_resume_cfg)
+                if int(preflight["reconciled"]["final_state"]["completed"]) > max_updates:
+                    raise ValueError("checkpoint completed step exceeds config.max_updates")
             except CommitDurabilityUnknownError as exc:
                 _safe_write_failure_receipt(
                     root,
                     "commit_durability_unknown",
                     str(exc),
-                    generation_id=generation_id,
+                    generation_id=exc.generation_id,
                     details={
-                        "completed": completed,
+                        "phase": "resume_preflight",
                         "commit_state": COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
                         "commit_visible": True,
                         "commit_durable": False,
@@ -660,9 +600,9 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                     root,
                     "post_commit_failure",
                     str(exc),
-                    generation_id=generation_id,
+                    generation_id=exc.generation_id,
                     details={
-                        "completed": completed,
+                        "phase": "resume_preflight",
                         "commit_state": COMMIT_STATE_DURABLE,
                         "commit_visible": True,
                         "commit_durable": True,
@@ -672,32 +612,366 @@ def run_synthetic(release_path: str, trust_anchor_path: str, expected: dict, con
                 )
                 raise
             except Exception as exc:
+                raw_role = config.get("resume_role")
                 _safe_write_failure_receipt(
                     root,
-                    "checkpoint_publish",
+                    "resume_preflight",
                     str(exc),
-                    generation_id=generation_id,
-                    details={
-                        "completed": completed,
-                        "commit_state": COMMIT_STATE_PRE_COMMIT_FAILURE,
-                        "commit_visible": False,
-                        "commit_durable": False,
-                    },
+                    details={"resume_role": raw_role if type(raw_role) in (str, type(None)) else repr(raw_role)},
                 )
                 raise
-            macros = next_macros
-            best = next_best
-            best_history = next_best_history
-            events = next_events
 
-    return {
-        "completed_updates": completed,
-        "best_step": None if best is None else best[0],
-        "last_step": completed,
-        "macros": macros,
-        "events": events,
-        "observed": False,
-    }
+        import torch
+
+        caller_rng_snapshot: tuple | None = None
+        if resume_payload is not None:
+            try:
+                caller_rng_snapshot = capture_cpu_rng_snapshot()
+            except Exception as exc:
+                _safe_write_failure_receipt(
+                    root,
+                    "resume_snapshot",
+                    str(exc),
+                    details={"phase": "caller_rng_snapshot", "rollback_attempted": False, "fail_stop": True},
+                )
+                raise
+        try:
+            model_cls, config_cls = load_class()
+            model = model_cls(config_cls())
+            opt = torch.optim.AdamW(
+                model.parameters(),
+                lr=EXPECTED_ADAMW_LR,
+                weight_decay=EXPECTED_ADAMW_WEIGHT_DECAY,
+                betas=EXPECTED_ADAMW_BETAS,
+                eps=EXPECTED_ADAMW_EPS,
+                amsgrad=EXPECTED_ADAMW_AMSGRAD,
+            )
+            rows = load_rows(horizons_path)
+            keys = load_keys(horizons_path)
+            dev_expected_digests = expected_dev_digests(rows)
+        except Exception as exc:
+            if caller_rng_snapshot is not None:
+                rb_errors = restore_cpu_rng_snapshot(caller_rng_snapshot)
+                if rb_errors:
+                    _safe_write_failure_receipt(
+                        root,
+                        "fatal_rollback",
+                        "RNG rollback failed after pre-resume setup failure",
+                        details={
+                            "original_error": str(exc),
+                            "rollback_errors": rb_errors,
+                            "fatal": True,
+                            "must_terminate_process": True,
+                        },
+                    )
+                    raise FatalRollbackError(
+                        "fatal pre-resume RNG rollback failure",
+                        original_error=str(exc),
+                        rollback_errors=rb_errors,
+                    ) from exc
+                _safe_write_failure_receipt(
+                    root,
+                    "resume_stage",
+                    str(exc),
+                    details={"phase": "pre_resume_setup", "rollback_succeeded": True, "fail_stop": True},
+                )
+            raise
+
+        completed = 0
+        epoch = 0
+        cursor = 0
+        last_cursor_before: int | None = None
+        last_receipt_sha256: str | None = None
+        best = None
+        best_history: list[dict] = []
+        macros = {}
+        dev_report_sha256s: dict[int, str] = {}
+        signal_statuses: dict[int, str] = {}
+        last_dev_report: dict | None = None
+        events = []
+        exposure_frames: list[bytes] = []
+        if resume_payload is not None:
+            restored = resume(
+                resume_payload,
+                model,
+                opt,
+                expected_resume_cfg,
+                failure_root=root,
+                caller_rng_snapshot=caller_rng_snapshot,
+            )
+            completed = int(restored["completed"])
+            epoch = int(restored["epoch"])
+            cursor = int(restored["cursor"])
+            last_cursor_before = restored["last_cursor_before"]
+            last_receipt_sha256 = restored["last_receipt_sha256"]
+            best = restored["best"]
+            best_history = [dict(item) for item in restored["best_history"]]
+            events = [int(event) for event in restored["events"]]
+            macros = {int(step): float(value) for step, value in restored["macros"].items()}
+            exposure_frames = list(restored["exposure_frames"])
+
+        release_audit = {
+            "ticket_id": release.get("ticket_id"),
+            "release_sha256": release.release_sha256,
+            "resume_policy": release.get("resume_policy"),
+        }
+        items = dev_items(rows)
+        while completed < max_updates:
+            step_epoch, cursor_before, expected_cursor_after = advance_window(epoch, cursor, batch_size)
+            batch, cursor_after, chosen = next_batch(seed, step_epoch, cursor_before, batch_size)
+            if cursor_after != expected_cursor_after:
+                raise ValueError("next_batch cursor_after mismatch")
+            completed_next = completed + 1
+            proposed_bytes = build_receipt_bytes(
+                batch,
+                completed_next,
+                step_epoch,
+                cursor_before,
+                cursor_after,
+                seed,
+                batch_size,
+            )
+            record, frozen_bytes = require_record(
+                proposed_bytes,
+                completed_next,
+                expected_seed=seed,
+                expected_batch=batch_size,
+                expected_epoch=step_epoch,
+                expected_cursor_before=cursor_before,
+                expected_cursor_after=cursor_after,
+                expected_source_id=SYNTHETIC_SOURCE_ID,
+                expected_source_sha256=source_digest,
+                expected_sampler_sha256=sampler_digest,
+            )
+            if record["videos"] != chosen:
+                raise ValueError("receipt videos do not match next_batch selection")
+            step_inc = optimizer_step(
+                model,
+                batch,
+                opt,
+                clip,
+                expected_forward_digests=record["forward_input_sha256"],
+            )
+            if step_inc != 1:
+                raise ValueError("optimizer_step did not complete one update")
+            completed += step_inc
+            epoch = step_epoch
+            cursor = cursor_after
+            last_cursor_before = cursor_before
+            last_receipt_sha256 = record["receipt_sha256"]
+            exposure_frames.append(frozen_bytes)
+            if completed in dev_events:
+                generation_id = f"u{completed}"
+                try:
+                    dev_report = evaluate_with_diagnostics(
+                        model,
+                        items,
+                        keys,
+                        expected_digests=dev_expected_digests,
+                        forbidden_video_ids=train_id_set,
+                        require_external_expectations=True,
+                    )
+                except EvaluatorMutationError as exc:
+                    _safe_write_failure_receipt(
+                        root,
+                        "dev_evaluator_mutation",
+                        str(exc),
+                        generation_id=generation_id,
+                        details={
+                            "completed": completed,
+                            "mutation_details": exc.mutation_details,
+                            "original_error": exc.original_error,
+                            "must_fail_stop": True,
+                            "rollback_promised": False,
+                        },
+                    )
+                    raise
+                except Exception as exc:
+                    _safe_write_failure_receipt(
+                        root,
+                        "dev_eval_failure",
+                        str(exc),
+                        generation_id=generation_id,
+                        details={"completed": completed},
+                    )
+                    raise
+                finally:
+                    model.train()
+
+                value = dev_report["macro"]
+                if type(value) not in (int, float) or isinstance(value, bool) or not math.isfinite(float(value)):
+                    _safe_write_failure_receipt(
+                        root,
+                        "dev_nonfinite",
+                        f"nonfinite DEV metric at {generation_id}",
+                        generation_id=generation_id,
+                        details={"completed": completed, "value": repr(value)},
+                    )
+                    raise ValueError(f"nonfinite DEV metric at step {completed}")
+                value = float(value)
+                dev_report_bytes = canonical_json_bytes(dev_report, max_bytes=MAX_DEV_REPORT_BYTES)
+                dev_report_sha256 = hashlib.sha256(dev_report_bytes).hexdigest()
+
+                next_macros = dict(macros)
+                next_macros[completed] = value
+                is_new_best = best is None or value < best[1]
+                next_best = (completed, value) if is_new_best else best
+                next_best_history = (
+                    best_history + [{"step": completed, "macro": value}] if is_new_best else list(best_history)
+                )
+                next_events = list(events) + [completed]
+
+                exposure_journal_bytes = b"[" + b",".join(exposure_frames) + b"]"
+                exposure_journal_sha256 = hashlib.sha256(exposure_journal_bytes).hexdigest()
+                sampler_bytes = build_sampler_section_bytes(
+                    completed=completed,
+                    epoch=epoch,
+                    cursor=cursor,
+                    last_cursor_before=last_cursor_before,
+                    seed=seed,
+                    batch_size=batch_size,
+                    exposure_journal_bytes=exposure_journal_bytes,
+                    last_receipt_sha256=last_receipt_sha256,
+                )
+                step_provenance = build_expected_provenance(
+                    effective_config_bytes,
+                    horizons_path,
+                    owner_trust_anchor_sha256=release.trust_anchor_sha256,
+                    owner_trust_root_status=release.trust_status,
+                    generation_id=generation_id,
+                    horizons_file_sha256=horizons_file_sha256,
+                )
+                payload = pack(
+                    {
+                        "completed": completed,
+                        "epoch": epoch,
+                        "cursor": cursor,
+                        "seed": seed,
+                        "batch_size": batch_size,
+                        "source_id": SYNTHETIC_SOURCE_ID,
+                        "source_sha256": source_digest,
+                        "sampler_sha256": sampler_digest,
+                        "exposure_schema": SCHEMA_VERSION,
+                        "exposure_journal_sha256": exposure_journal_sha256,
+                        "last_receipt_sha256": last_receipt_sha256,
+                        "provenance": step_provenance,
+                        "macro": value,
+                        "dev_report_sha256": dev_report_sha256,
+                        "release_audit": release_audit,
+                        "best_step": next_best[0],
+                        "best_macro": next_best[1],
+                        "best_history": next_best_history,
+                        "events": next_events,
+                        "macros": {str(step): metric for step, metric in next_macros.items()},
+                    },
+                    _sections(model, opt, sampler_bytes, exposure_journal_bytes),
+                )
+                try:
+                    _admit(unpack(payload), dev_events)
+                    committed = commit_event(
+                        root,
+                        generation_id,
+                        payload,
+                        is_new_best=is_new_best,
+                        expected_provenance=step_provenance,
+                        dev_report_bytes=dev_report_bytes,
+                        release_audit=release_audit,
+                        expected_dev_events=dev_events,
+                    )
+                    final_commit_sha256 = committed["commit_sha256"]
+                except CommitDurabilityUnknownError as exc:
+                    _safe_write_failure_receipt(
+                        root,
+                        "commit_durability_unknown",
+                        str(exc),
+                        generation_id=generation_id,
+                        details={
+                            "completed": completed,
+                            "commit_state": COMMIT_STATE_VISIBLE_DURABILITY_UNKNOWN,
+                            "commit_visible": True,
+                            "commit_durable": False,
+                            "commit_sha256": exc.commit_sha256,
+                            "must_fail_stop": True,
+                        },
+                    )
+                    raise
+                except PostCommitError as exc:
+                    final_commit_sha256 = exc.commit_sha256
+                    _safe_write_failure_receipt(
+                        root,
+                        "post_commit_failure",
+                        str(exc),
+                        generation_id=generation_id,
+                        details={
+                            "completed": completed,
+                            "commit_state": COMMIT_STATE_DURABLE,
+                            "commit_visible": True,
+                            "commit_durable": True,
+                            "post_commit_phase": exc.phase,
+                            "commit_sha256": exc.commit_sha256,
+                        },
+                    )
+                    raise
+                except Exception as exc:
+                    _safe_write_failure_receipt(
+                        root,
+                        "checkpoint_publish",
+                        str(exc),
+                        generation_id=generation_id,
+                        details={
+                            "completed": completed,
+                            "commit_state": COMMIT_STATE_PRE_COMMIT_FAILURE,
+                            "commit_visible": False,
+                            "commit_durable": False,
+                        },
+                    )
+                    raise
+                macros = next_macros
+                dev_report_sha256s[completed] = dev_report_sha256
+                signal_statuses[completed] = dev_report["signal_status"]
+                last_dev_report = dev_report
+                best = next_best
+                best_history = next_best_history
+                events = next_events
+
+        run_succeeded = True
+        return {
+            "completed_updates": completed,
+            "best_step": None if best is None else best[0],
+            "last_step": completed,
+            "macros": macros,
+            "events": events,
+            "dev_report_sha256s": dev_report_sha256s,
+            "signal_statuses": signal_statuses,
+            "last_dev_report": last_dev_report,
+            "release_ticket_id": release.get("ticket_id"),
+            "release_sha256": release.release_sha256,
+            "owner_trust_anchor_sha256": release.trust_anchor_sha256,
+            "owner_trust_root_status": release.trust_status,
+            "effective_config_sha256": resolved["effective_config_sha256"],
+            "observed": False,
+        }
+    finally:
+        outcome = "COMPLETED" if run_succeeded else "FAILED"
+        if run_succeeded:
+            finalize_release_nonce(
+                ledger_path,
+                release,
+                outcome=outcome,
+                now=verified_expected["now"],
+                final_commit_sha256=final_commit_sha256,
+            )
+        else:
+            try:
+                finalize_release_nonce(
+                    ledger_path,
+                    release,
+                    outcome=outcome,
+                    now=verified_expected["now"],
+                    final_commit_sha256=final_commit_sha256,
+                )
+            except Exception:
+                pass
 
 
 def _admit(decoded: dict, expected_dev_events: list[int] | None = None) -> dict:
@@ -802,7 +1076,6 @@ def resume(
         staged_np_rng = stage_numpy_rng(decoded["numpy_rng"])
         staged_torch_rng = stage_torch_rng(decoded["torch_rng"])
 
-        # Materialize and admit all returned metadata cleanly before live apply.
         admitted_result = {
             "completed": int(final_state["completed"]),
             "epoch": int(final_state["epoch"]),

@@ -11,6 +11,11 @@ import os
 from pathlib import Path
 
 from . import CANDIDATE_SHA256, HORIZONS_SHA256, LOSS_SHA256, SAMPLER_SHA256
+from .authorization import (
+    ALLOWED_RESUME_POLICIES,
+    OWNER_TRUST_STATUS_SYNTHETIC_TEST,
+    OWNER_TRUST_STATUS_VERIFIED,
+)
 from .exposure import (
     FORWARD_BINDING,
     HEX_CHARS,
@@ -25,12 +30,17 @@ from .plan import REMAINDER_POLICY, SYNTHETIC_SOURCE_ID, SYNTHETIC_TRAIN_IDS_SHA
 
 MAGIC = b"STCA"
 CHECKPOINT_SCHEMA_VERSION = "stca-v2"
-MANIFEST_SCHEMA_VERSION = "ckpt-manifest-v1"
-PROVENANCE_SCHEMA_VERSION = "prov-v1"
+MANIFEST_SCHEMA_VERSION = "ckpt-manifest-v2"
+PROVENANCE_SCHEMA_VERSION = "prov-v2"
 POINTER_SCHEMA_VERSION = "ptr-v1"
-COMMIT_SCHEMA_VERSION = "commit-v1"
+COMMIT_SCHEMA_VERSION = "commit-v2"
+DEV_REPORT_SCHEMA_VERSION = "dev-report-v1"
+DEV_METRIC_ID = "dev_delta_huber_macro"
+DEV_METRIC_VERSION = "stage-a-dev-v1"
+DEV_METRIC_STATUS = "DS_FROZEN_STAGE_A_V1"
 FAILURE_RECEIPT_SCHEMA_VERSION = "fail-receipt-v1"
 OWNER_TRUST_ROOT_STATUS = "PENDING_OWNER_C4"
+ALLOWED_ACTIVE_TRUST_STATUSES = frozenset({OWNER_TRUST_STATUS_VERIFIED, OWNER_TRUST_STATUS_SYNTHETIC_TEST})
 RNG_SCOPE = "cpu_only"
 
 COMMIT_STATE_PRE_COMMIT_FAILURE = "PRE_COMMIT_FAILURE"
@@ -53,6 +63,7 @@ MAX_CHECKPOINT_BYTES = 256 * 1024 * 1024
 MAX_POINTER_BYTES = 16384
 MAX_MANIFEST_BYTES = 65536
 MAX_COMMIT_BYTES = 131072
+MAX_DEV_REPORT_BYTES = 1 * 1024 * 1024
 MAX_BEST_HISTORY = 1024
 MAX_HORIZONS_FILE_BYTES = 16 * 1024 * 1024
 MAX_FAILURE_RECEIPTS = 1024
@@ -83,6 +94,10 @@ PROVENANCE_KEYS = frozenset(
         "manifest_schema",
         "pointer_schema",
         "commit_schema",
+        "dev_report_schema",
+        "dev_metric_id",
+        "dev_metric_version",
+        "dev_metric_status",
         "failure_receipt_schema",
         "rng_scope",
         "source_id",
@@ -98,6 +113,7 @@ PROVENANCE_KEYS = frozenset(
         "forward_binding",
         "effective_config_sha256",
         "generation_id",
+        "owner_trust_anchor_sha256",
         "owner_trust_root_status",
         "release_created",
     }
@@ -342,10 +358,81 @@ def _single_writer_lock(root: Path):
             os.close(fd)
 
 
+def _validate_dev_report_bytes(raw: bytes, *, expected_macro: float) -> tuple[dict, str]:
+    if type(raw) is not bytes or len(raw) < 2 or len(raw) > MAX_DEV_REPORT_BYTES:
+        raise ValueError("dev_report.json must be bounded canonical bytes")
+    report = strict_json_loads(raw, max_bytes=MAX_DEV_REPORT_BYTES)
+    if type(report) is not dict:
+        raise ValueError("dev_report.json must decode to an object")
+    if canonical_json_bytes(report, max_bytes=MAX_DEV_REPORT_BYTES) != raw:
+        raise ValueError("dev_report.json bytes are not canonical")
+    required = {
+        "dev_report_schema",
+        "metric_name",
+        "metric_version",
+        "metric_status",
+        "beta",
+        "local_weight",
+        "anchor_weight",
+        "horizons_sha256",
+        "macro",
+        "no_motion_macro",
+        "beats_no_motion",
+        "signal_status",
+        "video_count",
+        "pair_count",
+        "per_video_macro",
+        "per_horizon_macro",
+        "directional_cosine_loss",
+        "raw_cosine",
+        "magnitude_log_ratio_loss",
+        "norms_and_ratios",
+        "dev_forward_digests_sha256",
+    }
+    if not required.issubset(report.keys()):
+        raise ValueError("dev_report.json missing required frozen metric fields")
+    if report["dev_report_schema"] != DEV_REPORT_SCHEMA_VERSION:
+        raise ValueError("dev_report.json schema mismatch")
+    if (
+        report["metric_name"] != DEV_METRIC_ID
+        or report["metric_version"] != DEV_METRIC_VERSION
+        or report["metric_status"] != DEV_METRIC_STATUS
+    ):
+        raise ValueError("dev_report.json frozen metric identity mismatch")
+    if report["horizons_sha256"] != HORIZONS_SHA256:
+        raise ValueError("dev_report.json horizons_sha256 mismatch")
+    if report["video_count"] != 50 or report["pair_count"] != 147:
+        raise ValueError("dev_report.json coverage count mismatch")
+    macro_val = _require_finite_number(report["macro"], "dev_report.macro")
+    nm_val = _require_finite_number(report["no_motion_macro"], "dev_report.no_motion_macro")
+    if macro_val != float(expected_macro):
+        raise ValueError("dev_report.macro disagrees with checkpoint header/commit macro")
+    if report["beats_no_motion"] is not (macro_val < nm_val):
+        raise ValueError("dev_report.beats_no_motion disagrees with macro vs no_motion_macro")
+    expected_signal = "STRICTLY_BELOW_NO_MOTION" if (macro_val < nm_val) else "NO_POSITIVE_DELTA_SIGNAL"
+    if report["signal_status"] != expected_signal:
+        raise ValueError("dev_report.signal_status disagrees with comparator")
+    return report, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_release_audit(audit: object) -> dict:
+    if type(audit) is not dict or set(audit.keys()) != {"ticket_id", "release_sha256", "resume_policy"}:
+        raise ValueError("release_audit must contain exact keys {ticket_id, release_sha256, resume_policy}")
+    ticket_id = audit.get("ticket_id")
+    if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
+        raise ValueError("release_audit.ticket_id must be a trimmed nonempty string")
+    _require_hex64(audit.get("release_sha256"), "release_audit.release_sha256")
+    if audit.get("resume_policy") not in ALLOWED_RESUME_POLICIES:
+        raise ValueError("release_audit.resume_policy invalid")
+    return {"ticket_id": ticket_id, "release_sha256": audit["release_sha256"], "resume_policy": audit["resume_policy"]}
+
+
 def build_expected_provenance(
     effective_config_bytes: bytes,
     horizons_path: Path,
     *,
+    owner_trust_anchor_sha256: str,
+    owner_trust_root_status: str,
     generation_id: str | None = None,
     horizons_file_sha256: str | None = None,
 ) -> dict:
@@ -353,6 +440,9 @@ def build_expected_provenance(
         raise ValueError("effective_config_bytes must be non-empty bytes")
     if generation_id is not None:
         parse_generation_id(generation_id)
+    trust_sha = _require_hex64(owner_trust_anchor_sha256, "owner_trust_anchor_sha256")
+    if owner_trust_root_status not in ALLOWED_ACTIVE_TRUST_STATUSES:
+        raise ValueError("owner_trust_root_status must reflect verified external or explicit test trust")
     horizons_digest = (
         _require_hex64(horizons_file_sha256, "horizons_file_sha256")
         if horizons_file_sha256 is not None
@@ -366,6 +456,10 @@ def build_expected_provenance(
         "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
         "commit_schema": COMMIT_SCHEMA_VERSION,
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
+        "dev_metric_id": DEV_METRIC_ID,
+        "dev_metric_version": DEV_METRIC_VERSION,
+        "dev_metric_status": DEV_METRIC_STATUS,
         "failure_receipt_schema": FAILURE_RECEIPT_SCHEMA_VERSION,
         "rng_scope": RNG_SCOPE,
         "source_id": SYNTHETIC_SOURCE_ID,
@@ -381,7 +475,8 @@ def build_expected_provenance(
         "forward_binding": FORWARD_BINDING,
         "effective_config_sha256": hashlib.sha256(effective_config_bytes).hexdigest(),
         "generation_id": generation_id,
-        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
+        "owner_trust_anchor_sha256": trust_sha,
+        "owner_trust_root_status": owner_trust_root_status,
         "release_created": False,
     }
 
@@ -392,7 +487,7 @@ def verify_baseline_provenance(header: dict) -> dict:
     completed = require_exact_int(header.get("completed"), "header.completed", minimum=0)
     prov = header.get("provenance")
     if type(prov) is not dict:
-        raise ValueError("checkpoint header missing prov-v1 provenance")
+        raise ValueError("checkpoint header missing prov-v2 provenance")
     if set(prov) != PROVENANCE_KEYS:
         raise ValueError("checkpoint provenance field set invalid")
     expected_pins = {
@@ -401,6 +496,10 @@ def verify_baseline_provenance(header: dict) -> dict:
         "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "pointer_schema": POINTER_SCHEMA_VERSION,
         "commit_schema": COMMIT_SCHEMA_VERSION,
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
+        "dev_metric_id": DEV_METRIC_ID,
+        "dev_metric_version": DEV_METRIC_VERSION,
+        "dev_metric_status": DEV_METRIC_STATUS,
         "failure_receipt_schema": FAILURE_RECEIPT_SCHEMA_VERSION,
         "rng_scope": RNG_SCOPE,
         "source_id": SYNTHETIC_SOURCE_ID,
@@ -414,11 +513,13 @@ def verify_baseline_provenance(header: dict) -> dict:
         "sampler_schema": SAMPLER_SCHEMA_VERSION,
         "remainder_policy": REMAINDER_POLICY,
         "forward_binding": FORWARD_BINDING,
-        "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
     }
     for key, expected_val in expected_pins.items():
         if prov.get(key) != expected_val or type(prov.get(key)) is not str:
             raise ValueError(f"checkpoint provenance.{key} mismatch")
+    if prov.get("owner_trust_root_status") not in ALLOWED_ACTIVE_TRUST_STATUSES:
+        raise ValueError("checkpoint provenance missing verified owner_trust_root_status")
+    _require_hex64(prov.get("owner_trust_anchor_sha256"), "provenance.owner_trust_anchor_sha256")
     if prov.get("release_created") is not False:
         raise ValueError("checkpoint provenance.release_created must be false")
     _require_hex64(prov.get("horizons_file_sha256"), "provenance.horizons_file_sha256")
@@ -953,8 +1054,10 @@ def _validate_generation_record(root: Path, entry: object, expected_role: str) -
         "role",
         "generation_dir",
         "checkpoint_relpath",
+        "dev_report_relpath",
         "manifest_relpath",
         "checkpoint_sha256",
+        "dev_report_sha256",
         "manifest_sha256",
         "provenance_sha256",
         "completed",
@@ -970,6 +1073,7 @@ def _validate_generation_record(root: Path, entry: object, expected_role: str) -
     if completed != gen_step:
         raise ValueError("commit generation_id/completed mismatch")
     _require_hex64(entry.get("checkpoint_sha256"), f"commit.{expected_role}.checkpoint_sha256")
+    _require_hex64(entry.get("dev_report_sha256"), f"commit.{expected_role}.dev_report_sha256")
     _require_hex64(entry.get("manifest_sha256"), f"commit.{expected_role}.manifest_sha256")
     _require_hex64(entry.get("provenance_sha256"), f"commit.{expected_role}.provenance_sha256")
     _require_finite_number(entry.get("macro"), f"commit.{expected_role}.macro")
@@ -977,9 +1081,12 @@ def _validate_generation_record(root: Path, entry: object, expected_role: str) -
         raise ValueError("commit record generation_dir mismatch")
     if entry.get("checkpoint_relpath") != f"generations/{gen_id}-{expected_role}/checkpoint.bin":
         raise ValueError("commit record checkpoint_relpath mismatch")
+    if entry.get("dev_report_relpath") != f"generations/{gen_id}-{expected_role}/dev_report.json":
+        raise ValueError("commit record dev_report_relpath mismatch")
     if entry.get("manifest_relpath") != f"generations/{gen_id}-{expected_role}/manifest.json":
         raise ValueError("commit record manifest_relpath mismatch")
     _safe_generation_relpath(root, entry["checkpoint_relpath"], label="commit.checkpoint_relpath")
+    _safe_generation_relpath(root, entry["dev_report_relpath"], label="commit.dev_report_relpath")
     _safe_generation_relpath(root, entry["manifest_relpath"], label="commit.manifest_relpath")
     return entry
 
@@ -991,11 +1098,13 @@ def _parse_commit_bytes(root: Path, raw: bytes) -> dict:
         "manifest_schema",
         "pointer_schema",
         "provenance_schema",
+        "dev_report_schema",
         "commit_seq",
         "effective_config_sha256",
         "last",
         "best",
         "best_history",
+        "owner_trust_anchor_sha256",
         "owner_trust_root_status",
         "release_created",
     }
@@ -1009,9 +1118,12 @@ def _parse_commit_bytes(root: Path, raw: bytes) -> dict:
         raise ValueError("CURRENT_COMMIT pointer_schema mismatch")
     if commit.get("provenance_schema") != PROVENANCE_SCHEMA_VERSION:
         raise ValueError("CURRENT_COMMIT provenance_schema mismatch")
+    if commit.get("dev_report_schema") != DEV_REPORT_SCHEMA_VERSION:
+        raise ValueError("CURRENT_COMMIT dev_report_schema mismatch")
     require_exact_int(commit.get("commit_seq"), "commit.commit_seq", minimum=1)
     _require_hex64(commit.get("effective_config_sha256"), "commit.effective_config_sha256")
-    if commit.get("owner_trust_root_status") != OWNER_TRUST_ROOT_STATUS:
+    _require_hex64(commit.get("owner_trust_anchor_sha256"), "commit.owner_trust_anchor_sha256")
+    if commit.get("owner_trust_root_status") not in ALLOWED_ACTIVE_TRUST_STATUSES:
         raise ValueError("CURRENT_COMMIT owner_trust_root_status mismatch")
     if commit.get("release_created") is not False:
         raise ValueError("CURRENT_COMMIT release_created must be false")
@@ -1061,14 +1173,18 @@ def _verify_materialized_record(
         "manifest_schema",
         "checkpoint_schema",
         "provenance_schema",
+        "dev_report_schema",
         "generation_id",
         "role",
         "completed",
         "checkpoint_bytes",
         "checkpoint_sha256",
+        "dev_report_bytes",
+        "dev_report_sha256",
         "header_sha256",
         "provenance_sha256",
         "provenance",
+        "release_audit",
     }
     if type(manifest) is not dict or set(manifest) != required_man:
         raise ValueError(f"{role} manifest field set invalid")
@@ -1078,12 +1194,17 @@ def _verify_materialized_record(
         raise ValueError(f"{role} manifest checkpoint_schema mismatch")
     if manifest.get("provenance_schema") != PROVENANCE_SCHEMA_VERSION:
         raise ValueError(f"{role} manifest provenance_schema mismatch")
+    if manifest.get("dev_report_schema") != DEV_REPORT_SCHEMA_VERSION:
+        raise ValueError(f"{role} manifest dev_report_schema mismatch")
     if manifest.get("generation_id") != entry["generation_id"] or manifest.get("role") != role:
         raise ValueError(f"{role} manifest identity mismatch")
     if manifest.get("completed") != entry["completed"] or manifest.get("checkpoint_sha256") != entry["checkpoint_sha256"]:
         raise ValueError(f"{role} manifest digest/step mismatch")
+    if manifest.get("dev_report_sha256") != entry["dev_report_sha256"]:
+        raise ValueError(f"{role} manifest dev_report_sha256 mismatch")
     if manifest.get("provenance_sha256") != entry["provenance_sha256"]:
         raise ValueError(f"{role} manifest provenance_sha256 mismatch")
+    _validate_release_audit(manifest.get("release_audit"))
 
     ckpt_path = _safe_generation_relpath(root, entry["checkpoint_relpath"], label=f"{role}.checkpoint_relpath")
     payload = _read_bounded_bytes(ckpt_path, max_bytes=MAX_CHECKPOINT_BYTES, label=f"{role}.checkpoint.bin")
@@ -1092,10 +1213,22 @@ def _verify_materialized_record(
     if hashlib.sha256(payload).hexdigest() != entry["checkpoint_sha256"]:
         raise ValueError(f"{role} checkpoint sha256 mismatch")
 
+    dev_path = _safe_generation_relpath(root, entry["dev_report_relpath"], label=f"{role}.dev_report_relpath")
+    dev_raw = _read_bounded_bytes(dev_path, max_bytes=MAX_DEV_REPORT_BYTES, label=f"{role}.dev_report.json")
+    if len(dev_raw) != manifest.get("dev_report_bytes"):
+        raise ValueError(f"{role} dev_report byte count mismatch")
+    dev_report, dev_sha = _validate_dev_report_bytes(dev_raw, expected_macro=float(entry["macro"]))
+    if dev_sha != entry["dev_report_sha256"] or dev_sha != manifest.get("dev_report_sha256"):
+        raise ValueError(f"{role} dev_report sha256 mismatch")
+
     decoded = unpack(payload)
     header = decoded["header"]
     if header.get("completed") != entry["completed"]:
         raise ValueError(f"{role} header.completed disagrees with commit record")
+    if header.get("dev_report_sha256") != dev_sha:
+        raise ValueError(f"{role} header.dev_report_sha256 disagrees with dev_report.json")
+    if _validate_release_audit(header.get("release_audit")) != manifest.get("release_audit"):
+        raise ValueError(f"{role} header.release_audit disagrees with manifest")
     header_sha = hashlib.sha256(canonical_json_bytes(header, max_bytes=MAX_HEADER_BYTES)).hexdigest()
     if header_sha != manifest.get("header_sha256"):
         raise ValueError(f"{role} header sha256 disagrees with manifest")
@@ -1120,7 +1253,15 @@ def _verify_materialized_record(
     if macro_val != float(entry["macro"]):
         raise ValueError(f"{role} header.macro disagrees with commit record")
 
-    return {"record": entry, "manifest": manifest, "payload": payload, "decoded": decoded, "provenance": prov}
+    return {
+        "record": entry,
+        "manifest": manifest,
+        "payload": payload,
+        "dev_report_bytes": dev_raw,
+        "dev_report": dev_report,
+        "decoded": decoded,
+        "provenance": prov,
+    }
 
 
 def _sync_derived_mirrors(root: Path, commit: dict, commit_sha256: str) -> None:
@@ -1186,8 +1327,10 @@ def _fsync_committed_state(root: Path, commit: dict) -> None:
     for entry in unique_records.values():
         gen_dir = _safe_generation_relpath(root, entry["generation_dir"], label="recovery.generation_dir")
         ckpt_path = _safe_generation_relpath(root, entry["checkpoint_relpath"], label="recovery.checkpoint_relpath")
+        dev_path = _safe_generation_relpath(root, entry["dev_report_relpath"], label="recovery.dev_report_relpath")
         man_path = _safe_generation_relpath(root, entry["manifest_relpath"], label="recovery.manifest_relpath")
         _fsync_file(ckpt_path)
+        _fsync_file(dev_path)
         _fsync_file(man_path)
         _fsync_dir(gen_dir)
     _fsync_dir(root / "generations")
@@ -1223,6 +1366,10 @@ def resolve_commit(
         raise ValueError("LAST effective_config_sha256 disagrees with CURRENT_COMMIT")
     if best_verified["provenance"]["effective_config_sha256"] != commit["effective_config_sha256"]:
         raise ValueError("BEST effective_config_sha256 disagrees with CURRENT_COMMIT")
+    if last_verified["provenance"]["owner_trust_anchor_sha256"] != commit["owner_trust_anchor_sha256"]:
+        raise ValueError("LAST owner_trust_anchor_sha256 disagrees with CURRENT_COMMIT")
+    if best_verified["provenance"]["owner_trust_anchor_sha256"] != commit["owner_trust_anchor_sha256"]:
+        raise ValueError("BEST owner_trust_anchor_sha256 disagrees with CURRENT_COMMIT")
 
     last_header = last_verified["decoded"]["header"]
     best_header = best_verified["decoded"]["header"]
@@ -1283,6 +1430,8 @@ def resolve_pointer(
         "pointer": chosen["record"],
         "manifest": chosen["manifest"],
         "payload": chosen["payload"],
+        "dev_report": chosen["dev_report"],
+        "dev_report_bytes": chosen["dev_report_bytes"],
         "decoded": chosen["decoded"],
         "provenance": chosen["provenance"],
     }
@@ -1369,28 +1518,35 @@ def _build_generation_manifest(
     role: str,
     completed: int,
     payload: bytes,
+    dev_report_bytes: bytes,
     header: dict,
     prov: dict,
-) -> tuple[dict, bytes, str, str]:
+    release_audit: dict,
+) -> tuple[dict, bytes, str, str, str]:
     checkpoint_sha256 = hashlib.sha256(payload).hexdigest()
+    dev_report_sha256 = hashlib.sha256(dev_report_bytes).hexdigest()
     header_sha256 = hashlib.sha256(canonical_json_bytes(header, max_bytes=MAX_HEADER_BYTES)).hexdigest()
     provenance_sha256 = hashlib.sha256(canonical_json_bytes(prov, max_bytes=MAX_HEADER_BYTES)).hexdigest()
     manifest = {
         "manifest_schema": MANIFEST_SCHEMA_VERSION,
         "checkpoint_schema": CHECKPOINT_SCHEMA_VERSION,
         "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+        "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
         "generation_id": generation_id,
         "role": role,
         "completed": completed,
         "checkpoint_bytes": len(payload),
         "checkpoint_sha256": checkpoint_sha256,
+        "dev_report_bytes": len(dev_report_bytes),
+        "dev_report_sha256": dev_report_sha256,
         "header_sha256": header_sha256,
         "provenance_sha256": provenance_sha256,
         "provenance": prov,
+        "release_audit": release_audit,
     }
     manifest_bytes = canonical_json_bytes(manifest, max_bytes=MAX_MANIFEST_BYTES)
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-    return manifest, manifest_bytes, checkpoint_sha256, manifest_sha256
+    return manifest, manifest_bytes, checkpoint_sha256, dev_report_sha256, manifest_sha256
 
 
 def _materialize_generation(
@@ -1399,10 +1555,12 @@ def _materialize_generation(
     role: str,
     completed: int,
     payload: bytes,
+    dev_report_bytes: bytes,
     header: dict,
     prov: dict,
     *,
     expected_provenance: dict,
+    release_audit: dict,
 ) -> dict:
     generations = root / "generations"
     stage_root = root / "stage"
@@ -1412,8 +1570,8 @@ def _materialize_generation(
     if generations.stat().st_dev != stage_root.stat().st_dev:
         raise ValueError("stage and generations must be on the same filesystem")
 
-    manifest, manifest_bytes, checkpoint_sha256, manifest_sha256 = _build_generation_manifest(
-        generation_id, role, completed, payload, header, prov
+    manifest, manifest_bytes, checkpoint_sha256, dev_report_sha256, manifest_sha256 = _build_generation_manifest(
+        generation_id, role, completed, payload, dev_report_bytes, header, prov, release_audit
     )
     final = generations / f"{generation_id}-{role}"
     if final.exists():
@@ -1421,11 +1579,12 @@ def _materialize_generation(
         if not final.is_dir():
             raise ValueError("existing generation path is not a directory")
         entries = sorted(p.name for p in final.iterdir())
-        if entries != ["checkpoint.bin", "manifest.json"]:
+        if entries != ["checkpoint.bin", "dev_report.json", "manifest.json"]:
             raise ValueError("conflicting files in existing generation directory")
         existing_ckpt = _read_bounded_bytes(final / "checkpoint.bin", max_bytes=MAX_CHECKPOINT_BYTES, label="existing checkpoint")
+        existing_dev = _read_bounded_bytes(final / "dev_report.json", max_bytes=MAX_DEV_REPORT_BYTES, label="existing dev_report")
         existing_man = _read_bounded_bytes(final / "manifest.json", max_bytes=MAX_MANIFEST_BYTES, label="existing manifest")
-        if existing_ckpt != payload or existing_man != manifest_bytes:
+        if existing_ckpt != payload or existing_dev != dev_report_bytes or existing_man != manifest_bytes:
             raise ValueError("conflicting existing generation; immutable artifact refuses overwrite")
         decoded_existing = unpack(existing_ckpt)
         verify_checkpoint_provenance(
@@ -1434,6 +1593,7 @@ def _materialize_generation(
             expected_generation_id=generation_id,
         )
         _fsync_file(final / "checkpoint.bin")
+        _fsync_file(final / "dev_report.json")
         _fsync_file(final / "manifest.json")
         _fsync_dir(final)
         _fsync_dir(generations)
@@ -1444,8 +1604,10 @@ def _materialize_generation(
                 "role": role,
                 "generation_dir": f"generations/{generation_id}-{role}",
                 "checkpoint_relpath": f"generations/{generation_id}-{role}/checkpoint.bin",
+                "dev_report_relpath": f"generations/{generation_id}-{role}/dev_report.json",
                 "manifest_relpath": f"generations/{generation_id}-{role}/manifest.json",
                 "checkpoint_sha256": checkpoint_sha256,
+                "dev_report_sha256": dev_report_sha256,
                 "manifest_sha256": manifest_sha256,
                 "provenance_sha256": manifest["provenance_sha256"],
                 "completed": completed,
@@ -1467,6 +1629,9 @@ def _materialize_generation(
     target = stage / "checkpoint.bin"
     target.write_bytes(payload)
     _fsync_file(target)
+    dev_stage = stage / "dev_report.json"
+    dev_stage.write_bytes(dev_report_bytes)
+    _fsync_file(dev_stage)
     man_stage = stage / "manifest.json"
     man_stage.write_bytes(manifest_bytes)
     _fsync_file(man_stage)
@@ -1475,6 +1640,8 @@ def _materialize_generation(
     staged_readback = target.read_bytes()
     if staged_readback != payload or hashlib.sha256(staged_readback).hexdigest() != checkpoint_sha256:
         raise ValueError("staged readback mismatch")
+    if dev_stage.read_bytes() != dev_report_bytes:
+        raise ValueError("staged dev_report readback mismatch")
     if man_stage.read_bytes() != manifest_bytes:
         raise ValueError("staged manifest readback mismatch")
     unpack(staged_readback)
@@ -1485,6 +1652,8 @@ def _materialize_generation(
 
     if (final / "checkpoint.bin").read_bytes() != payload:
         raise ValueError("checkpoint readback mismatch")
+    if (final / "dev_report.json").read_bytes() != dev_report_bytes:
+        raise ValueError("dev_report readback mismatch")
     if (final / "manifest.json").read_bytes() != manifest_bytes:
         raise ValueError("manifest readback mismatch")
 
@@ -1495,8 +1664,10 @@ def _materialize_generation(
             "role": role,
             "generation_dir": f"generations/{generation_id}-{role}",
             "checkpoint_relpath": f"generations/{generation_id}-{role}/checkpoint.bin",
+            "dev_report_relpath": f"generations/{generation_id}-{role}/dev_report.json",
             "manifest_relpath": f"generations/{generation_id}-{role}/manifest.json",
             "checkpoint_sha256": checkpoint_sha256,
+            "dev_report_sha256": dev_report_sha256,
             "manifest_sha256": manifest_sha256,
             "provenance_sha256": manifest["provenance_sha256"],
             "completed": completed,
@@ -1572,6 +1743,8 @@ def commit_event(
     *,
     is_new_best: bool,
     expected_provenance: dict,
+    dev_report_bytes: bytes,
+    release_audit: dict,
     expected_dev_events: list[int] | None = None,
 ) -> dict:
     root = _reject_root_if_scored(root)
@@ -1579,6 +1752,7 @@ def commit_event(
         raise ValueError("is_new_best must be an exact bool")
     if type(expected_provenance) is not dict:
         raise ValueError("expected_provenance must be a dict")
+    validated_audit = _validate_release_audit(release_audit)
     gen_step = parse_generation_id(generation_id)
 
     decoded = unpack(payload)
@@ -1594,6 +1768,11 @@ def commit_event(
         expected_generation_id=generation_id,
     )
     macro_val = _require_finite_number(header.get("macro"), "header.macro")
+    _, dev_report_sha256 = _validate_dev_report_bytes(dev_report_bytes, expected_macro=macro_val)
+    if header.get("dev_report_sha256") != dev_report_sha256:
+        raise ValueError("header.dev_report_sha256 disagrees with committed dev_report.json")
+    if _validate_release_audit(header.get("release_audit")) != validated_audit:
+        raise ValueError("header.release_audit disagrees with active release audit")
     best_step = require_exact_int(header.get("best_step"), "header.best_step", minimum=0)
     best_macro = _require_finite_number(header.get("best_macro"), "header.best_macro")
     payload_sha256 = hashlib.sha256(payload).hexdigest()
@@ -1611,18 +1790,21 @@ def commit_event(
                 prev_best_is_this = prev_commit["best"]["generation_id"] == generation_id
                 if (
                     prev_commit["last"]["checkpoint_sha256"] != payload_sha256
+                    or prev_commit["last"]["dev_report_sha256"] != dev_report_sha256
                     or prev_best_is_this != is_new_best
                     or (is_new_best and prev_commit["best"]["checkpoint_sha256"] != payload_sha256)
                 ):
                     raise ValueError("conflicting commit for already-committed generation")
                 last_mat = _materialize_generation(
-                    root, generation_id, "LAST", gen_step, payload, header, prov,
+                    root, generation_id, "LAST", gen_step, payload, dev_report_bytes, header, prov,
                     expected_provenance=expected_provenance,
+                    release_audit=validated_audit,
                 )
                 if is_new_best:
                     _materialize_generation(
-                        root, generation_id, "BEST", gen_step, payload, header, prov,
+                        root, generation_id, "BEST", gen_step, payload, dev_report_bytes, header, prov,
                         expected_provenance=expected_provenance,
+                        release_audit=validated_audit,
                     )
                 else:
                     _verify_materialized_record(
@@ -1682,13 +1864,15 @@ def commit_event(
                 raise ValueError("initial commit must set header best to initial generation")
 
         last_mat = _materialize_generation(
-            root, generation_id, "LAST", gen_step, payload, header, prov,
+            root, generation_id, "LAST", gen_step, payload, dev_report_bytes, header, prov,
             expected_provenance=expected_provenance,
+            release_audit=validated_audit,
         )
         if is_new_best:
             best_mat = _materialize_generation(
-                root, generation_id, "BEST", gen_step, payload, header, prov,
+                root, generation_id, "BEST", gen_step, payload, dev_report_bytes, header, prov,
                 expected_provenance=expected_provenance,
+                release_audit=validated_audit,
             )
             best_record = best_mat["record"]
             history = ([] if prev_commit is None else list(prev_commit["best_history"])) + [best_record]
@@ -1715,12 +1899,14 @@ def commit_event(
             "manifest_schema": MANIFEST_SCHEMA_VERSION,
             "pointer_schema": POINTER_SCHEMA_VERSION,
             "provenance_schema": PROVENANCE_SCHEMA_VERSION,
+            "dev_report_schema": DEV_REPORT_SCHEMA_VERSION,
             "commit_seq": next_seq,
             "effective_config_sha256": prov["effective_config_sha256"],
             "last": last_mat["record"],
             "best": best_record,
             "best_history": history,
-            "owner_trust_root_status": OWNER_TRUST_ROOT_STATUS,
+            "owner_trust_anchor_sha256": prov["owner_trust_anchor_sha256"],
+            "owner_trust_root_status": prov["owner_trust_root_status"],
             "release_created": False,
         }
         commit_bytes = canonical_json_bytes(commit, max_bytes=MAX_COMMIT_BYTES)
