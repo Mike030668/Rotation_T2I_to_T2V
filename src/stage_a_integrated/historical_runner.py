@@ -95,15 +95,24 @@ from .gpu_runtime import (
     verify_model_device_and_dtype,
 )
 from .historical_corpus import (
+    EXPECTED_EFFECTIVE_TRAIN_COUNT,
+    EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256,
+    EXPECTED_EXCLUDED_TRAIN_COUNT,
     HISTORICAL_SOURCE_ID,
     HISTORICAL_TEMPORAL_AXIS_SEMANTICS,
+    ORIGINAL_DEV_FORWARD_DIGESTS_SHA256,
+    ORIGINAL_DEV_PAYLOAD_SHA256,
+    ORIGINAL_HEADER_SHA256,
     TEXT_MASK_POLICY,
+    TRAIN_EXCLUSION_MANIFEST_SHA256,
     SelectiveSafetensorsReader,
     advance_historical_window,
     build_historical_dev_items,
     eligible_train_records,
+    epoch_remainder_video_ids,
     load_verified_portable_manifest,
     load_verified_split_ids,
+    load_verified_train_exclusion_manifest,
     next_historical_train_batch,
 )
 from .model_adapter import load_class
@@ -140,8 +149,11 @@ COMMON_GPU_KEYS = frozenset(
         "corpus_shard_path",
         "split_ids_dir",
         "horizons_path",
+        "train_exclusion_manifest_path",
         "preflight_receipt_path",
         "preflight_receipt_sha256",
+        "expected_header_sha256",
+        "expected_effective_train_payload_sha256",
         "expected_eligible_train_count",
         "expected_eligible_train_ids_sha256",
         "output_root",
@@ -152,6 +164,7 @@ COMMON_GPU_KEYS = frozenset(
         "loss_sha256",
         "horizons_sha256",
         "sampler_sha256",
+        "train_exclusion_manifest_sha256",
         "optimizer",
         "lr",
         "weight_decay",
@@ -170,6 +183,7 @@ COMMON_GPU_KEYS = frozenset(
 SMOKE_REQUIRED_KEYS = COMMON_GPU_KEYS | frozenset({"dev_sealed", "smoke_checkpoint_roundtrip"})
 PILOT_REQUIRED_KEYS = COMMON_GPU_KEYS | frozenset(
     {
+        "expected_dev_payload_sha256",
         "single_seed_exploratory",
         "checkpoint_schema",
         "provenance_schema",
@@ -274,6 +288,8 @@ def _validate_common_gpu_config(config: dict, *, required_keys: frozenset[str], 
         ("loss_sha256", LOSS_SHA256),
         ("horizons_sha256", HORIZONS_SHA256),
         ("sampler_sha256", SAMPLER_SHA256),
+        ("train_exclusion_manifest_sha256", TRAIN_EXCLUSION_MANIFEST_SHA256),
+        ("expected_header_sha256", ORIGINAL_HEADER_SHA256),
         ("forward_binding", FORWARD_BINDING),
         ("representation_firewall", REPRESENTATION_FIREWALL),
         ("temporal_axis_semantics", HISTORICAL_TEMPORAL_AXIS_SEMANTICS),
@@ -289,6 +305,7 @@ def _validate_common_gpu_config(config: dict, *, required_keys: frozenset[str], 
             "corpus_shard_path",
             "split_ids_dir",
             "horizons_path",
+            "train_exclusion_manifest_path",
             "preflight_receipt_path",
             "output_root",
             "trust_anchor_path",
@@ -297,11 +314,22 @@ def _validate_common_gpu_config(config: dict, *, required_keys: frozenset[str], 
         )
     }
     preflight_sha = _req_sha(config["preflight_receipt_sha256"], "config.preflight_receipt_sha256")
-    elig_cnt = require_exact_int(config["expected_eligible_train_count"], "config.expected_eligible_train_count", minimum=4, maximum=400)
+    eff_train_payload_sha = _req_sha(config["expected_effective_train_payload_sha256"], "config.expected_effective_train_payload_sha256")
+    elig_cnt = require_exact_int(
+        config["expected_eligible_train_count"],
+        "config.expected_eligible_train_count",
+        minimum=EXPECTED_EFFECTIVE_TRAIN_COUNT,
+        maximum=EXPECTED_EFFECTIVE_TRAIN_COUNT,
+    )
     elig_sha = _req_sha(config["expected_eligible_train_ids_sha256"], "config.expected_eligible_train_ids_sha256")
+    if elig_sha != EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256:
+        raise ValueError("config.expected_eligible_train_ids_sha256 disagrees with pinned TRAIN387 hash")
 
     if file_sha256(Path(paths["horizons_path"]), max_bytes=MAX_HORIZONS_FILE_BYTES) != HORIZONS_SHA256:
         raise ValueError("horizons_path SHA mismatch")
+    excl_file_sha = file_sha256(Path(paths["train_exclusion_manifest_path"]), max_bytes=1 * 1024 * 1024)
+    if excl_file_sha != TRAIN_EXCLUSION_MANIFEST_SHA256:
+        raise ValueError("train_exclusion_manifest_path SHA mismatch")
     verify_sampler_pin()
 
     return {
@@ -312,8 +340,11 @@ def _validate_common_gpu_config(config: dict, *, required_keys: frozenset[str], 
         "batch": 4,
         "seed": 17,
         "preflight_receipt_sha256": preflight_sha,
+        "expected_header_sha256": ORIGINAL_HEADER_SHA256,
+        "expected_effective_train_payload_sha256": eff_train_payload_sha,
         "expected_eligible_train_count": elig_cnt,
         "expected_eligible_train_ids_sha256": elig_sha,
+        "train_exclusion_manifest_sha256": TRAIN_EXCLUSION_MANIFEST_SHA256,
     }
 
 
@@ -337,6 +368,7 @@ def resolve_historical_cuda_smoke_config(config: dict) -> dict:
         "corpus_shard_path": base["corpus_shard_path"],
         "split_ids_dir": base["split_ids_dir"],
         "horizons_path": base["horizons_path"],
+        "train_exclusion_manifest_path": base["train_exclusion_manifest_path"],
         "preflight_receipt_path": base["preflight_receipt_path"],
         "output_root": base["output_root"],
         "trust_anchor_path": base["trust_anchor_path"],
@@ -365,6 +397,8 @@ def resolve_historical_gpu_pilot_config(config: dict) -> dict:
         scope=PILOT_SCOPE,
         data="historical_500_1_train_dev",
     )
+    if config["expected_dev_payload_sha256"] != ORIGINAL_DEV_PAYLOAD_SHA256:
+        raise ValueError("GPU pilot config.expected_dev_payload_sha256 disagrees with ORIGINAL_DEV_PAYLOAD_SHA256")
     require_exact_int(config["max_updates"], "config.max_updates", minimum=128, maximum=128)
     if config["dev_events"] != [32, 64, 96, 128] or config["single_seed_exploratory"] is not True:
         raise ValueError("GPU pilot must specify dev_events=[32, 64, 96, 128] and single_seed_exploratory=True")
@@ -399,6 +433,7 @@ def resolve_historical_gpu_pilot_config(config: dict) -> dict:
         "corpus_shard_path": base["corpus_shard_path"],
         "split_ids_dir": base["split_ids_dir"],
         "horizons_path": base["horizons_path"],
+        "train_exclusion_manifest_path": base["train_exclusion_manifest_path"],
         "preflight_receipt_path": base["preflight_receipt_path"],
         "output_root": base["output_root"],
         "trust_anchor_path": base["trust_anchor_path"],
@@ -422,7 +457,7 @@ def resolve_historical_gpu_pilot_config(config: dict) -> dict:
     }
 
 
-def _verify_preflight_prerequisite(resolved: dict) -> dict:
+def _verify_preflight_prerequisite(resolved: dict, *, require_dev_payload: bool = False) -> dict:
     p_path = Path(resolved["preflight_receipt_path"])
     if not p_path.is_file():
         raise ValueError("preflight receipt file missing")
@@ -431,12 +466,28 @@ def _verify_preflight_prerequisite(resolved: dict) -> dict:
     if actual_sha != resolved["preflight_receipt_sha256"]:
         raise ValueError("preflight_receipt_sha256 disagrees with resolved config pin")
     doc = strict_json_loads(raw, max_bytes=MAX_ARTIFACT_BYTES)
-    if doc.get("overall_verdict") != "PREFLIGHT_PASS" or doc.get("heldout_sealed") is not True:
+    if doc.get("overall_verdict") != "PREFLIGHT_PASS" or doc.get("failures") != [] or doc.get("heldout_sealed") is not True:
         raise ValueError("historical ABI preflight did not PASS cleanly")
     held_audit = doc.get("heldout_audit", {})
     if held_audit.get("heldout_keys_opened") != 0 or held_audit.get("heldout_payload_bytes_read") != 0:
         raise ValueError("preflight receipt indicates heldout access")
+    prov = doc.get("provenance", {})
+    if prov.get("train_exclusion_manifest_sha256") != resolved["train_exclusion_manifest_sha256"]:
+        raise ValueError("preflight receipt train_exclusion_manifest_sha256 disagrees with config pin")
+    hdr_audit = doc.get("safetensors_header_audit", {})
+    if hdr_audit.get("header_sha256") != resolved["expected_header_sha256"]:
+        raise ValueError("preflight receipt header_sha256 disagrees with config pin")
+    t_audit = doc.get("tensor_and_mask_audit", {})
+    if t_audit.get("effective_train_payload_sha256") != resolved["expected_effective_train_payload_sha256"]:
+        raise ValueError("preflight receipt effective_train_payload_sha256 disagrees with config pin")
+    if require_dev_payload and t_audit.get("dev_payload_sha256") != resolved["expected_dev_payload_sha256"]:
+        raise ValueError("preflight receipt dev_payload_sha256 disagrees with config pin")
+    eff_leak = doc.get("leakage_audit_effective_train_dev", {})
+    if eff_leak.get("exact_image_collisions") != {} or eff_leak.get("reverse_or_bothway_collisions") != []:
+        raise ValueError("preflight receipt reports unresolved effective TRAIN+DEV collisions")
     elig = doc.get("train_eligibility_and_schedule", {})
+    if elig.get("excluded_train_count") != EXPECTED_EXCLUDED_TRAIN_COUNT:
+        raise ValueError("preflight receipt excluded_train_count != 13")
     if elig.get("eligible_train_count") != resolved["expected_eligible_train_count"] or elig.get("eligible_train_ids_sha256") != resolved["expected_eligible_train_ids_sha256"]:
         raise ValueError("config eligible train count/hash disagrees with verified preflight receipt")
     return doc
@@ -465,7 +516,20 @@ def _sync_owner_expected(expected: dict, resolved: dict) -> dict:
     return verified
 
 
-def _build_historical_exposure_receipt_bytes(batch: list[dict], completed: int, epoch: int, before: int, after: int, seed: int, batch_size: int) -> tuple[bytes, dict]:
+def _build_historical_exposure_receipt_bytes(
+    batch: list[dict],
+    completed: int,
+    epoch: int,
+    before: int,
+    after: int,
+    seed: int,
+    batch_size: int,
+    *,
+    forbidden_video_ids: frozenset[str] = frozenset(),
+) -> tuple[bytes, dict]:
+    videos = [it["id_movi"] for it in batch]
+    if any(vid in forbidden_video_ids for vid in videos):
+        raise PermissionError(f"forbidden or excluded video ID in exposure receipt: {videos}")
     body = {
         "schema": SCHEMA_VERSION,
         "completed": completed,
@@ -480,7 +544,7 @@ def _build_historical_exposure_receipt_bytes(batch: list[dict], completed: int, 
         "batch_size": batch_size,
         "cursor_before": before,
         "cursor_after": after,
-        "videos": [it["id_movi"] for it in batch],
+        "videos": videos,
         "anchor_ordinal": [it["anchor_ordinal"] for it in batch],
         "anchor": [it["anchor"] for it in batch],
         "selected_ordinals": [it["selected_ordinals"] for it in batch],
@@ -527,7 +591,7 @@ def run_historical_cuda_smoke(
     *,
     allow_synthetic_test_trust: bool = False,
 ) -> dict:
-    """Execute bounded 1-4 update CUDA smoke on actual TRAIN records only (DEV + held-out sealed)."""
+    """Execute bounded 1-4 update CUDA smoke on effective TRAIN387 records only (excluded, DEV & held-out sealed)."""
     resolved = resolve_historical_cuda_smoke_config(config)
     if canonical_resolved_path(trust_anchor_path, "trust_anchor_path") != resolved["trust_anchor_path"]:
         raise ExecutionNotAuthorized("trust_anchor_path mismatch")
@@ -552,12 +616,21 @@ def run_historical_cuda_smoke(
         import numpy
         import torch
 
-        _verify_preflight_prerequisite(resolved)
+        _verify_preflight_prerequisite(resolved, require_dev_payload=False)
         splits = load_verified_split_ids(Path(resolved["split_ids_dir"]))
         manifest = load_verified_portable_manifest(Path(resolved["corpus_manifest_path"]), splits)
-        elig_recs, _, elig_ids_sha = eligible_train_records(manifest)
-        if len(elig_recs) != resolved["expected_eligible_train_count"] or elig_ids_sha != resolved["expected_eligible_train_ids_sha256"]:
-            raise ValueError("eligible train pool disagrees with preflight config pin")
+        excl_manifest = load_verified_train_exclusion_manifest(Path(resolved["train_exclusion_manifest_path"]), splits)
+        elig_recs, inelig_recs, elig_ids_sha = eligible_train_records(
+            manifest, excluded_train_ids=excl_manifest["excluded_train_set"]
+        )
+        if (
+            inelig_recs
+            or len(elig_recs) != resolved["expected_eligible_train_count"]
+            or elig_ids_sha != resolved["expected_eligible_train_ids_sha256"]
+            or not excl_manifest["excluded_train_set"].isdisjoint({r["id_movi"] for r in elig_recs})
+        ):
+            raise ValueError("effective TRAIN387 pool disagrees with preflight / exclusion manifest pin")
+        forbidden_train_ids = excl_manifest["excluded_train_set"] | splits["dev_set"] | splits["heldout_set"]
 
         device = resolve_runtime_device(resolved["device"])
         runtime_env = configure_fp32_precision_and_determinism(device)
@@ -570,6 +643,8 @@ def run_historical_cuda_smoke(
         before_params = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
         step_records = []
+        exposed_ids_sequence: list[str] = []
+        epoch_rollover_remainders: list[dict] = []
         completed = 0
         epoch = 0
         cursor = 0
@@ -578,19 +653,56 @@ def run_historical_cuda_smoke(
         exposure_frames: list[bytes] = []
         tensor_cache: dict[str, tuple] = {}
 
-        with SelectiveSafetensorsReader(Path(resolved["corpus_shard_path"]), manifest, allowed_splits=frozenset({"train"})) as reader:
+        with SelectiveSafetensorsReader(
+            Path(resolved["corpus_shard_path"]),
+            manifest,
+            allowed_splits=frozenset({"train"}),
+            excluded_video_ids=excl_manifest["excluded_train_set"],
+            unbuffered=True,
+        ) as reader:
+            if reader.header_sha256 != resolved["expected_header_sha256"]:
+                raise ValueError("shard header_sha256 disagrees with resolved config pin")
             while completed < resolved["max_updates"]:
                 step_epoch, cursor_before, expected_after = advance_historical_window(epoch, cursor, resolved["batch"], len(elig_recs))
+                if step_epoch > epoch:
+                    epoch_rollover_remainders.append(
+                        {
+                            "completed_epoch": epoch,
+                            "skipped_remainder_ids": epoch_remainder_video_ids(
+                                elig_recs, seed=resolved["seed"], epoch=epoch, batch_size=resolved["batch"]
+                            ),
+                        }
+                    )
                 batch, cursor_after, chosen = next_historical_train_batch(
-                    reader, elig_recs, eligible_ids_sha256=elig_ids_sha, seed=resolved["seed"], epoch=step_epoch, cursor_before=cursor_before, batch_size=resolved["batch"], tensor_cache=tensor_cache
+                    reader,
+                    elig_recs,
+                    eligible_ids_sha256=elig_ids_sha,
+                    seed=resolved["seed"],
+                    epoch=step_epoch,
+                    cursor_before=cursor_before,
+                    batch_size=resolved["batch"],
+                    tensor_cache=tensor_cache,
+                    forbidden_video_ids=forbidden_train_ids,
                 )
                 if cursor_after != expected_after:
                     raise ValueError("cursor_after mismatch")
+                if any(it["id_movi"] in forbidden_train_ids for it in batch):
+                    raise PermissionError("excluded or non-train video entered CUDA smoke batch")
                 completed += 1
                 epoch, cursor, last_cursor_before = step_epoch, cursor_after, cursor_before
-                exp_bytes, exp_rec = _build_historical_exposure_receipt_bytes(batch, completed, step_epoch, cursor_before, cursor_after, resolved["seed"], resolved["batch"])
+                exp_bytes, exp_rec = _build_historical_exposure_receipt_bytes(
+                    batch,
+                    completed,
+                    step_epoch,
+                    cursor_before,
+                    cursor_after,
+                    resolved["seed"],
+                    resolved["batch"],
+                    forbidden_video_ids=forbidden_train_ids,
+                )
                 exposure_frames.append(exp_bytes)
                 last_receipt_sha = exp_rec["receipt_sha256"]
+                exposed_ids_sequence.extend(chosen)
 
                 tel = gpu_optimizer_step(
                     model,
@@ -612,8 +724,17 @@ def run_historical_cuda_smoke(
                 )
             counters = reader.audit_counters()
 
-        if counters["heldout_keys_opened"] != 0 or counters["heldout_payload_bytes_read"] != 0 or counters["opened_key_counts_by_split"]["dev"] != 0:
-            raise PermissionError("CUDA smoke opened sealed DEV or held-out keys")
+        if (
+            counters["heldout_keys_opened"] != 0
+            or counters["heldout_payload_bytes_read"] != 0
+            or counters["excluded_keys_opened"] != 0
+            or counters["excluded_payload_bytes_read"] != 0
+            or counters["opened_key_counts_by_split"]["dev"] != 0
+        ):
+            raise PermissionError("CUDA smoke opened sealed DEV, held-out, or excluded train keys")
+        excluded_exposed = sum(1 for vid in exposed_ids_sequence if vid in excl_manifest["excluded_train_set"])
+        if excluded_exposed != 0:
+            raise PermissionError("excluded train ID recorded in CUDA smoke exposures")
 
         changed_tensors = sum(1 for k, v in model.state_dict().items() if not bool(torch.equal(v.detach().cpu(), before_params[k])))
         if changed_tensors == 0:
@@ -645,6 +766,8 @@ def run_historical_cuda_smoke(
             preflight_sha = resolved["preflight_receipt_sha256"]
             prov = build_gpu_provenance(
                 resolved["effective_config_sha256"],
+                train_exclusion_manifest_sha256=excl_manifest["manifest_sha256"],
+                excluded_train_count=len(excl_manifest["excluded_train_set"]),
                 eligible_train_ids_sha256=elig_ids_sha,
                 eligible_train_count=len(elig_recs),
                 preflight_receipt_sha256=preflight_sha,
@@ -700,6 +823,18 @@ def run_historical_cuda_smoke(
             "verdict": "CUDA_SMOKE_PASS",
             "completed_updates": completed,
             "changed_param_tensors": changed_tensors,
+            "train_exclusion_manifest_sha256": excl_manifest["manifest_sha256"],
+            "excluded_train_count": len(excl_manifest["excluded_train_set"]),
+            "eligible_train_count": len(elig_recs),
+            "eligible_train_ids_sha256": elig_ids_sha,
+            "header_sha256": resolved["expected_header_sha256"],
+            "exposed_video_ids_ordered": exposed_ids_sequence,
+            "unique_exposed_video_count": len(set(exposed_ids_sequence)),
+            "excluded_train_ids_exposed_count": excluded_exposed,
+            "epoch_rollover_remainders": epoch_rollover_remainders,
+            "active_epoch_remainder_pool_ids": epoch_remainder_video_ids(
+                elig_recs, seed=resolved["seed"], epoch=epoch, batch_size=resolved["batch"]
+            ),
             "runtime_environment": runtime_env,
             "adamw_step_device_policy": ADAMW_STEP_DEVICE_POLICY,
             "observed_adamw_step_device": actual_step_device,
@@ -712,6 +847,7 @@ def run_historical_cuda_smoke(
                 "code_commit_sha": release.observed_code_commit_sha,
                 "code_tree_sha": release.observed_code_tree_sha,
                 "effective_config_sha256": resolved["effective_config_sha256"],
+                "train_exclusion_manifest_sha256": excl_manifest["manifest_sha256"],
                 "release_ticket_id": release.get("ticket_id"),
                 "release_sha256": release.release_sha256,
             },
@@ -737,7 +873,7 @@ def run_historical_gpu_pilot(
     *,
     allow_synthetic_test_trust: bool = False,
 ) -> dict:
-    """Execute fresh Stage A 128-update historical GPU pilot under frozen protocol and stage-a-dev-v1."""
+    """Execute fresh Stage A 128-update historical GPU pilot on effective TRAIN387 + frozen DEV50/147."""
     resolved = resolve_historical_gpu_pilot_config(config)
     if canonical_resolved_path(trust_anchor_path, "trust_anchor_path") != resolved["trust_anchor_path"]:
         raise ExecutionNotAuthorized("trust_anchor_path mismatch")
@@ -762,12 +898,21 @@ def run_historical_gpu_pilot(
     try:
         import torch
 
-        _verify_preflight_prerequisite(resolved)
+        _verify_preflight_prerequisite(resolved, require_dev_payload=True)
         splits = load_verified_split_ids(Path(resolved["split_ids_dir"]))
         manifest = load_verified_portable_manifest(Path(resolved["corpus_manifest_path"]), splits)
-        elig_recs, inelig_recs, elig_ids_sha = eligible_train_records(manifest)
-        if len(elig_recs) != resolved["expected_eligible_train_count"] or elig_ids_sha != resolved["expected_eligible_train_ids_sha256"]:
-            raise ValueError("eligible train pool disagrees with preflight config pin")
+        excl_manifest = load_verified_train_exclusion_manifest(Path(resolved["train_exclusion_manifest_path"]), splits)
+        elig_recs, inelig_recs, elig_ids_sha = eligible_train_records(
+            manifest, excluded_train_ids=excl_manifest["excluded_train_set"]
+        )
+        if (
+            inelig_recs
+            or len(elig_recs) != resolved["expected_eligible_train_count"]
+            or elig_ids_sha != resolved["expected_eligible_train_ids_sha256"]
+            or not excl_manifest["excluded_train_set"].isdisjoint({r["id_movi"] for r in elig_recs})
+        ):
+            raise ValueError("effective TRAIN387 pool disagrees with preflight / exclusion manifest pin")
+        forbidden_train_ids = excl_manifest["excluded_train_set"] | splits["dev_set"] | splits["heldout_set"]
 
         device = resolve_runtime_device(resolved["device"])
         runtime_env = configure_fp32_precision_and_determinism(device)
@@ -795,22 +940,62 @@ def run_historical_gpu_pilot(
         last_dev_report: dict | None = None
         exposure_frames: list[bytes] = []
         train_telemetry: list[dict] = []
+        exposed_ids_sequence: list[str] = []
+        epoch_rollover_remainders: list[dict] = []
         tensor_cache: dict[str, tuple] = {}
         release_audit = {"ticket_id": release.get("ticket_id"), "release_sha256": release.release_sha256, "resume_policy": release.get("resume_policy")}
         forbidden_dev_ids = set(splits["train_set"] | splits["heldout_set"])
 
-        with SelectiveSafetensorsReader(Path(resolved["corpus_shard_path"]), manifest, allowed_splits=frozenset({"train", "dev"})) as reader:
+        with SelectiveSafetensorsReader(
+            Path(resolved["corpus_shard_path"]),
+            manifest,
+            allowed_splits=frozenset({"train", "dev"}),
+            excluded_video_ids=excl_manifest["excluded_train_set"],
+            unbuffered=True,
+        ) as reader:
+            if reader.header_sha256 != resolved["expected_header_sha256"]:
+                raise ValueError("shard header_sha256 disagrees with resolved config pin")
             dev_bundle = build_historical_dev_items(reader, manifest, Path(resolved["horizons_path"]), verify_target_leak_invariance=True)
+            if dev_bundle["dev_forward_digests_sha256"] != ORIGINAL_DEV_FORWARD_DIGESTS_SHA256:
+                raise ValueError("historical DEV forward digests disagree with frozen DEV50/147 pin")
 
             while completed < max_updates:
                 step_epoch, cursor_before, expected_after = advance_historical_window(epoch, cursor, resolved["batch"], len(elig_recs))
+                if step_epoch > epoch:
+                    epoch_rollover_remainders.append(
+                        {
+                            "completed_epoch": epoch,
+                            "skipped_remainder_ids": epoch_remainder_video_ids(
+                                elig_recs, seed=resolved["seed"], epoch=epoch, batch_size=resolved["batch"]
+                            ),
+                        }
+                    )
                 batch, cursor_after, chosen = next_historical_train_batch(
-                    reader, elig_recs, eligible_ids_sha256=elig_ids_sha, seed=resolved["seed"], epoch=step_epoch, cursor_before=cursor_before, batch_size=resolved["batch"], tensor_cache=tensor_cache
+                    reader,
+                    elig_recs,
+                    eligible_ids_sha256=elig_ids_sha,
+                    seed=resolved["seed"],
+                    epoch=step_epoch,
+                    cursor_before=cursor_before,
+                    batch_size=resolved["batch"],
+                    tensor_cache=tensor_cache,
+                    forbidden_video_ids=forbidden_train_ids,
                 )
                 if cursor_after != expected_after:
                     raise ValueError("cursor_after mismatch")
+                if any(it["id_movi"] in forbidden_train_ids for it in batch):
+                    raise PermissionError("excluded or non-train video entered GPU pilot batch")
                 completed_next = completed + 1
-                exp_bytes, exp_rec = _build_historical_exposure_receipt_bytes(batch, completed_next, step_epoch, cursor_before, cursor_after, resolved["seed"], resolved["batch"])
+                exp_bytes, exp_rec = _build_historical_exposure_receipt_bytes(
+                    batch,
+                    completed_next,
+                    step_epoch,
+                    cursor_before,
+                    cursor_after,
+                    resolved["seed"],
+                    resolved["batch"],
+                    forbidden_video_ids=forbidden_train_ids,
+                )
 
                 tel = gpu_optimizer_step(
                     model,
@@ -826,6 +1011,7 @@ def run_historical_gpu_pilot(
                 last_cursor_before = cursor_before
                 last_receipt_sha256 = exp_rec["receipt_sha256"]
                 exposure_frames.append(exp_bytes)
+                exposed_ids_sequence.extend(chosen)
                 train_telemetry.append({"step": completed, "epoch": step_epoch, "videos": chosen, **tel})
 
                 if completed in dev_events:
@@ -873,6 +1059,8 @@ def run_historical_gpu_pilot(
                     )
                     step_prov = build_gpu_provenance(
                         resolved["effective_config_sha256"],
+                        train_exclusion_manifest_sha256=excl_manifest["manifest_sha256"],
+                        excluded_train_count=len(excl_manifest["excluded_train_set"]),
                         eligible_train_ids_sha256=elig_ids_sha,
                         eligible_train_count=len(elig_recs),
                         preflight_receipt_sha256=resolved["preflight_receipt_sha256"],
@@ -940,8 +1128,16 @@ def run_historical_gpu_pilot(
 
             counters = reader.audit_counters()
 
-        if counters["heldout_keys_opened"] != 0 or counters["heldout_payload_bytes_read"] != 0:
-            raise PermissionError("GPU pilot opened held-out keys")
+        if (
+            counters["heldout_keys_opened"] != 0
+            or counters["heldout_payload_bytes_read"] != 0
+            or counters["excluded_keys_opened"] != 0
+            or counters["excluded_payload_bytes_read"] != 0
+        ):
+            raise PermissionError("GPU pilot opened held-out or excluded train keys")
+        excluded_exposed = sum(1 for vid in exposed_ids_sequence if vid in excl_manifest["excluded_train_set"])
+        if excluded_exposed != 0:
+            raise PermissionError("excluded train ID recorded in GPU pilot exposures")
 
         best_step = None if best is None else best[0]
         best_macro = None if best is None else best[1]
@@ -968,9 +1164,20 @@ def run_historical_gpu_pilot(
             "signal_statuses": {str(s): st for s, st in signal_statuses.items()},
             "final_commit_sha256": final_commit_sha,
             "initial_model_state_sha256": initial_params_sha256,
+            "train_exclusion_manifest_sha256": excl_manifest["manifest_sha256"],
+            "excluded_train_count": len(excl_manifest["excluded_train_set"]),
             "eligible_train_count": len(elig_recs),
             "ineligible_train_count": len(inelig_recs),
             "eligible_train_ids_sha256": elig_ids_sha,
+            "header_sha256": resolved["expected_header_sha256"],
+            "exposed_exposures_total": len(exposed_ids_sequence),
+            "unique_exposed_video_count": len(set(exposed_ids_sequence)),
+            "exposed_video_ids_ordered": exposed_ids_sequence,
+            "excluded_train_ids_exposed_count": excluded_exposed,
+            "epoch_rollover_remainders": epoch_rollover_remainders,
+            "active_epoch_remainder_pool_ids": epoch_remainder_video_ids(
+                elig_recs, seed=resolved["seed"], epoch=epoch, batch_size=resolved["batch"]
+            ),
             "train_telemetry_sha256": telemetry_sha,
             "heldout_sealed": True,
             "heldout_audit": counters,
@@ -979,6 +1186,7 @@ def run_historical_gpu_pilot(
                 "code_commit_sha": release.observed_code_commit_sha,
                 "code_tree_sha": release.observed_code_tree_sha,
                 "effective_config_sha256": resolved["effective_config_sha256"],
+                "train_exclusion_manifest_sha256": excl_manifest["manifest_sha256"],
                 "release_ticket_id": release.get("ticket_id"),
                 "release_sha256": release.release_sha256,
                 "owner_trust_anchor_sha256": release.trust_anchor_sha256,

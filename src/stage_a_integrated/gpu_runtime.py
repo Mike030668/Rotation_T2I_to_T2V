@@ -164,6 +164,8 @@ GPU_PROVENANCE_KEYS = frozenset(
         "source_id",
         "corpus_manifest_sha256",
         "corpus_shard_attested_sha256",
+        "train_exclusion_manifest_sha256",
+        "excluded_train_count",
         "eligible_train_ids_sha256",
         "eligible_train_count",
         "preflight_receipt_sha256",
@@ -837,6 +839,8 @@ def unpack_gpu_checkpoint(payload: bytes) -> dict:
 def build_gpu_provenance(
     effective_config_sha256: str,
     *,
+    train_exclusion_manifest_sha256: str,
+    excluded_train_count: int,
     eligible_train_ids_sha256: str,
     eligible_train_count: int,
     preflight_receipt_sha256: str,
@@ -845,6 +849,8 @@ def build_gpu_provenance(
     generation_id: str | None = None,
 ) -> dict:
     _req_hex64(effective_config_sha256, "effective_config_sha256")
+    _req_hex64(train_exclusion_manifest_sha256, "train_exclusion_manifest_sha256")
+    excl_cnt = require_exact_int(excluded_train_count, "excluded_train_count", minimum=0, maximum=396)
     _req_hex64(eligible_train_ids_sha256, "eligible_train_ids_sha256")
     _req_hex64(preflight_receipt_sha256, "preflight_receipt_sha256")
     _req_hex64(owner_trust_anchor_sha256, "owner_trust_anchor_sha256")
@@ -871,6 +877,8 @@ def build_gpu_provenance(
         "source_id": HISTORICAL_SOURCE_ID,
         "corpus_manifest_sha256": PORTABLE_MANIFEST_SHA256,
         "corpus_shard_attested_sha256": PORTABLE_SHARD_ATTESTED_SHA256,
+        "train_exclusion_manifest_sha256": train_exclusion_manifest_sha256,
+        "excluded_train_count": excl_cnt,
         "eligible_train_ids_sha256": eligible_train_ids_sha256,
         "eligible_train_count": elig_cnt,
         "preflight_receipt_sha256": preflight_receipt_sha256,

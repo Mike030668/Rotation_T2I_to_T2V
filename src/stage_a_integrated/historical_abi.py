@@ -29,14 +29,23 @@ from .historical_corpus import (
     CONVERSION_READBACK_LOG_SHA256,
     CONVERSION_STAGE1_SHA256,
     CONVERSION_STAGE2_SHA256,
+    EXPECTED_EFFECTIVE_TRAIN_COUNT,
+    EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256,
+    EXPECTED_EXCLUDED_TRAIN_COUNT,
+    EXPECTED_RAW_TRAIN_IDS_SHA256,
     HISTORICAL_SOURCE_ID,
     HISTORICAL_TEMPORAL_AXIS_SEMANTICS,
     MIN_ELIGIBLE_TRAIN_FRAMES,
+    ORIGINAL_DEV_FORWARD_DIGESTS_SHA256,
+    ORIGINAL_DEV_PAYLOAD_SHA256,
+    ORIGINAL_HEADER_SHA256,
+    ORIGINAL_RAW_TRAIN_PAYLOAD_SHA256,
     PORTABLE_MANIFEST_SHA256,
     PORTABLE_SHARD_ATTESTED_SHA256,
     SOURCE_PTH_BYTES,
     SOURCE_PTH_SHA256,
     TEXT_MASK_POLICY,
+    TRAIN_EXCLUSION_MANIFEST_SHA256,
     TRAIN_IDS_SHA256,
     DEV_IDS_SHA256,
     HELDOUT_IDS_SHA256,
@@ -46,8 +55,10 @@ from .historical_corpus import (
     build_historical_dev_items,
     build_historical_item,
     eligible_train_records,
+    epoch_remainder_video_ids,
     load_verified_portable_manifest,
     load_verified_split_ids,
+    load_verified_train_exclusion_manifest,
     summarize_tensor_mask_and_digests,
 )
 from .plan import require_exact_int, verify_sampler_pin
@@ -83,6 +94,7 @@ REQUIRED_PREFLIGHT_CONFIG_KEYS = frozenset(
         "corpus_shard_path",
         "split_ids_dir",
         "horizons_path",
+        "train_exclusion_manifest_path",
         "output_root",
         "trust_anchor_path",
         "revocation_path",
@@ -95,6 +107,7 @@ REQUIRED_PREFLIGHT_CONFIG_KEYS = frozenset(
         "source_pth_sha256",
         "portable_manifest_sha256",
         "portable_shard_attested_sha256",
+        "train_exclusion_manifest_sha256",
         "train_ids_sha256",
         "dev_ids_sha256",
         "heldout_ids_sha256",
@@ -209,6 +222,9 @@ def resolve_historical_preflight_config(config: dict) -> dict:
     corpus_shard_path = canonical_resolved_path(config["corpus_shard_path"], "config.corpus_shard_path")
     split_ids_dir = canonical_resolved_path(config["split_ids_dir"], "config.split_ids_dir")
     horizons_path = canonical_resolved_path(config["horizons_path"], "config.horizons_path")
+    train_exclusion_manifest_path = canonical_resolved_path(
+        config["train_exclusion_manifest_path"], "config.train_exclusion_manifest_path"
+    )
     output_root = canonical_resolved_path(config["output_root"], "config.output_root")
     trust_anchor_path = canonical_resolved_path(config["trust_anchor_path"], "config.trust_anchor_path")
     revocation_path = canonical_resolved_path(config["revocation_path"], "config.revocation_path")
@@ -223,6 +239,7 @@ def resolve_historical_preflight_config(config: dict) -> dict:
         "source_pth_sha256": SOURCE_PTH_SHA256,
         "portable_manifest_sha256": PORTABLE_MANIFEST_SHA256,
         "portable_shard_attested_sha256": PORTABLE_SHARD_ATTESTED_SHA256,
+        "train_exclusion_manifest_sha256": TRAIN_EXCLUSION_MANIFEST_SHA256,
         "train_ids_sha256": TRAIN_IDS_SHA256,
         "dev_ids_sha256": DEV_IDS_SHA256,
         "heldout_ids_sha256": HELDOUT_IDS_SHA256,
@@ -240,6 +257,9 @@ def resolve_historical_preflight_config(config: dict) -> dict:
     manifest_file_sha256 = file_sha256(Path(corpus_manifest_path), max_bytes=8 * 1024 * 1024)
     if manifest_file_sha256 != PORTABLE_MANIFEST_SHA256:
         raise ValueError("portable manifest file sha256 disagrees with pinned PORTABLE_MANIFEST_SHA256")
+    exclusion_manifest_file_sha256 = file_sha256(Path(train_exclusion_manifest_path), max_bytes=1 * 1024 * 1024)
+    if exclusion_manifest_file_sha256 != TRAIN_EXCLUSION_MANIFEST_SHA256:
+        raise ValueError("train exclusion manifest file sha256 disagrees with pinned TRAIN_EXCLUSION_MANIFEST_SHA256")
     verify_sampler_pin()
 
     if config["package"] != "stage_a_integrated":
@@ -260,6 +280,7 @@ def resolve_historical_preflight_config(config: dict) -> dict:
         "corpus_shard_path": corpus_shard_path,
         "split_ids_dir": split_ids_dir,
         "horizons_path": horizons_path,
+        "train_exclusion_manifest_path": train_exclusion_manifest_path,
         "output_root": output_root,
         "trust_anchor_path": trust_anchor_path,
         "revocation_path": revocation_path,
@@ -267,6 +288,7 @@ def resolve_historical_preflight_config(config: dict) -> dict:
         **pin_checks,
         "horizons_file_sha256": horizons_file_sha256,
         "manifest_file_sha256": manifest_file_sha256,
+        "train_exclusion_manifest_file_sha256": exclusion_manifest_file_sha256,
         "release_created": False,
     }
     eff_bytes = canonical_json_bytes(effective, max_bytes=MAX_CONFIG_BYTES)
@@ -428,6 +450,33 @@ def _atomic_write_json(path: Path, doc: dict) -> tuple[bytes, str]:
     return payload, digest
 
 
+def _scan_reverse_and_symmetry(
+    fwd_index: dict[str, list[dict]],
+    endpoint_index: dict[tuple[str, str], list[dict]],
+    authorized_digests: list[dict],
+) -> tuple[list[dict], list[str]]:
+    reverse_collisions: list[dict] = []
+    self_symmetric_ids: list[str] = []
+    for entry in authorized_digests:
+        vid = entry["id_movi"]
+        fwd_matches = [m for m in (fwd_index.get(entry["rev_img_f32_sha256"]) or []) if m["id_movi"] != vid]
+        if fwd_matches:
+            reverse_collisions.append({"source": vid, "source_split": entry["split"], "matches": fwd_matches})
+        elif fwd_index.get(entry["rev_img_f32_sha256"]):
+            self_symmetric_ids.append(vid)
+        rev_pair = (entry["last_frame_sha256"], entry["first_frame_sha256"])
+        ep_matches = [m for m in (endpoint_index.get(rev_pair) or []) if m["id_movi"] != vid]
+        if ep_matches:
+            reverse_collisions.append(
+                {
+                    "source": vid,
+                    "source_split": entry["split"],
+                    "endpoint_reverse_matches": ep_matches,
+                }
+            )
+    return reverse_collisions, sorted(set(self_symmetric_ids))
+
+
 def run_historical_abi_preflight(
     release_path: str,
     trust_anchor_path: str,
@@ -467,6 +516,10 @@ def run_historical_abi_preflight(
     try:
         splits = load_verified_split_ids(Path(resolved["split_ids_dir"]))
         manifest = load_verified_portable_manifest(Path(resolved["corpus_manifest_path"]), splits)
+        excl_manifest = load_verified_train_exclusion_manifest(
+            Path(resolved["train_exclusion_manifest_path"]), splits
+        )
+        excluded_set = excl_manifest["excluded_train_set"]
 
         # Metadata-only duplicate/reverse ID check across all 500 IDs
         norm_groups: dict[str, list[dict]] = {}
@@ -476,9 +529,20 @@ def run_historical_abi_preflight(
             norm_groups.setdefault(norm, []).append({"id_movi": raw_id, "split": rec["split"]})
         metadata_id_collisions = {k: v for k, v in norm_groups.items() if len(v) > 1}
 
-        elig_recs, inelig_recs, eligible_ids_sha256 = eligible_train_records(manifest, min_frames=MIN_ELIGIBLE_TRAIN_FRAMES)
-        train_lengths = [len(r["ids_frames"]) for r in manifest["records"] if r["split"] == "train"]
-        train_lengths_sorted = sorted(train_lengths)
+        raw_elig, raw_inelig, raw_train_ids_sha256 = eligible_train_records(
+            manifest, min_frames=MIN_ELIGIBLE_TRAIN_FRAMES
+        )
+        elig_recs, inelig_recs, eligible_ids_sha256 = eligible_train_records(
+            manifest,
+            min_frames=MIN_ELIGIBLE_TRAIN_FRAMES,
+            excluded_train_ids=excluded_set,
+        )
+        eff_train_lengths = [
+            len(r["ids_frames"])
+            for r in manifest["records"]
+            if r["split"] == "train" and r["id_movi"] not in excluded_set
+        ]
+        train_lengths_sorted = sorted(eff_train_lengths)
         median_len = train_lengths_sorted[len(train_lengths_sorted) // 2]
 
         n_elig = len(elig_recs)
@@ -486,8 +550,26 @@ def run_historical_abi_preflight(
         remainder_per_epoch = n_elig % PILOT_BATCH_SIZE
         full_epochs = PILOT_MAX_UPDATES // steps_per_epoch if steps_per_epoch > 0 else 0
         tail_steps = PILOT_MAX_UPDATES % steps_per_epoch if steps_per_epoch > 0 else 0
+        ep0_remainder_ids = epoch_remainder_video_ids(
+            elig_recs, seed=PILOT_SEED, epoch=0, batch_size=PILOT_BATCH_SIZE
+        )
+        ep1_remainder_ids = epoch_remainder_video_ids(
+            elig_recs, seed=PILOT_SEED, epoch=1, batch_size=PILOT_BATCH_SIZE
+        )
 
         failures: list[str] = []
+        if len(excluded_set) != EXPECTED_EXCLUDED_TRAIN_COUNT:
+            failures.append(f"excluded_train_count_mismatch: {len(excluded_set)} != {EXPECTED_EXCLUDED_TRAIN_COUNT}")
+        if len(raw_elig) != EXPECTED_SPLIT_COUNTS["train"] or raw_inelig or raw_train_ids_sha256 != EXPECTED_RAW_TRAIN_IDS_SHA256:
+            failures.append("raw_train_pool_or_digest_mismatch")
+        if n_elig != EXPECTED_EFFECTIVE_TRAIN_COUNT:
+            failures.append(f"effective_train_count_mismatch: {n_elig} != {EXPECTED_EFFECTIVE_TRAIN_COUNT}")
+        if inelig_recs:
+            failures.append(f"effective_ineligible_train_records: {len(inelig_recs)}")
+        if eligible_ids_sha256 != EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256:
+            failures.append("effective_train_ids_sha256_mismatch")
+        if not excluded_set.isdisjoint({r["id_movi"] for r in elig_recs}):
+            failures.append("excluded_train_id_present_in_effective_pool")
         if n_elig < PILOT_BATCH_SIZE:
             failures.append(f"eligible_train_count_below_batch: {n_elig} < {PILOT_BATCH_SIZE}")
 
@@ -506,13 +588,20 @@ def run_historical_abi_preflight(
             Path(resolved["corpus_shard_path"]),
             manifest,
             allowed_splits=frozenset({"train", "dev"}),
+            unbuffered=True,
         ) as reader:
             hdr_summary = reader.header_summary()
 
             authorized_recs = [r for r in manifest["records"] if r["split"] in ("train", "dev")]
-            fwd_index: dict[str, list[dict]] = {}
-            endpoint_index: dict[tuple[str, str], list[dict]] = {}
+            raw_fwd_index: dict[str, list[dict]] = {}
+            raw_endpoint_index: dict[tuple[str, str], list[dict]] = {}
+            raw_authorized_digests: list[dict] = []
+            eff_fwd_index: dict[str, list[dict]] = {}
+            eff_endpoint_index: dict[tuple[str, str], list[dict]] = {}
+            eff_authorized_digests: list[dict] = []
+
             payload_digests_by_split: dict[str, list[str]] = {"train": [], "dev": []}
+            eff_train_payload_digests: list[str] = []
             zero_mask_summary = {
                 "stored_text_mask_present": False,
                 "text_mask_policy": TEXT_MASK_POLICY,
@@ -524,23 +613,32 @@ def run_historical_abi_preflight(
                 "max_trailing_repeated_rows": 0,
             }
 
-            authorized_digests: list[dict] = []
             for rec in sorted(authorized_recs, key=lambda r: (r["split"], r["key"])):
                 info = summarize_tensor_mask_and_digests(rec, reader)
                 payload_digests_by_split[rec["split"]].append(info["record_payload_sha256"])
-                fwd_index.setdefault(info["fwd_img_f32_sha256"], []).append({"id_movi": rec["id_movi"], "split": rec["split"]})
-                endpoint_index.setdefault((info["first_frame_sha256"], info["last_frame_sha256"]), []).append(
-                    {"id_movi": rec["id_movi"], "split": rec["split"]}
-                )
-                authorized_digests.append(
-                    {
-                        "id_movi": rec["id_movi"],
-                        "split": rec["split"],
-                        "rev_img_f32_sha256": info["rev_img_f32_sha256"],
-                        "first_frame_sha256": info["first_frame_sha256"],
-                        "last_frame_sha256": info["last_frame_sha256"],
-                    }
-                )
+                is_excluded = rec["split"] == "train" and rec["id_movi"] in excluded_set
+                is_effective = rec["split"] == "dev" or (rec["split"] == "train" and not is_excluded)
+
+                if rec["split"] == "train" and not is_excluded:
+                    eff_train_payload_digests.append(info["record_payload_sha256"])
+
+                member_entry = {"id_movi": rec["id_movi"], "split": rec["split"]}
+                digest_entry = {
+                    "id_movi": rec["id_movi"],
+                    "split": rec["split"],
+                    "rev_img_f32_sha256": info["rev_img_f32_sha256"],
+                    "first_frame_sha256": info["first_frame_sha256"],
+                    "last_frame_sha256": info["last_frame_sha256"],
+                }
+                raw_fwd_index.setdefault(info["fwd_img_f32_sha256"], []).append(member_entry)
+                raw_endpoint_index.setdefault((info["first_frame_sha256"], info["last_frame_sha256"]), []).append(member_entry)
+                raw_authorized_digests.append(digest_entry)
+
+                if is_effective:
+                    eff_fwd_index.setdefault(info["fwd_img_f32_sha256"], []).append(member_entry)
+                    eff_endpoint_index.setdefault((info["first_frame_sha256"], info["last_frame_sha256"]), []).append(member_entry)
+                    eff_authorized_digests.append(digest_entry)
+
                 if info["text_zero_token_rows"] > 0:
                     zero_mask_summary[f"{rec['split']}_records_with_zero_rows"] += 1
                 zero_mask_summary["max_zero_rows_observed"] = max(
@@ -558,8 +656,13 @@ def run_historical_abi_preflight(
                     info["text_trailing_repeated_rows"],
                 )
 
-                # Build sample forward digests + counterfactual target-leak invariance on first N eligible train items
-                if rec["split"] == "train" and len(rec["ids_frames"]) >= MIN_ELIGIBLE_TRAIN_FRAMES and len(train_sample_checks) < TRAIN_SAMPLE_DIGEST_LIMIT:
+                # Build sample forward digests + counterfactual target-leak invariance on retained effective train items ONLY
+                if (
+                    rec["split"] == "train"
+                    and not is_excluded
+                    and len(rec["ids_frames"]) >= MIN_ELIGIBLE_TRAIN_FRAMES
+                    and len(train_sample_checks) < TRAIN_SAMPLE_DIGEST_LIMIT
+                ):
                     ordinals, history = sample(rec["ids_frames"], rec["id_movi"], 0, PILOT_SEED)
                     cur_ord, tgt_ord = int(ordinals[-2]), int(ordinals[-1])
                     hist_ords = [int(x) for x in history[cur_ord]]
@@ -592,31 +695,37 @@ def run_historical_abi_preflight(
                         }
                     )
 
-            exact_img_collisions = {k: v for k, v in fwd_index.items() if len(v) > 1}
-            reverse_img_collisions: list[dict] = []
-            self_symmetric_ids: list[str] = []
-            for entry in authorized_digests:
-                vid = entry["id_movi"]
-                fwd_matches = [m for m in (fwd_index.get(entry["rev_img_f32_sha256"]) or []) if m["id_movi"] != vid]
-                if fwd_matches:
-                    reverse_img_collisions.append({"source": vid, "source_split": entry["split"], "matches": fwd_matches})
-                elif fwd_index.get(entry["rev_img_f32_sha256"]):
-                    self_symmetric_ids.append(vid)
-                rev_pair = (entry["last_frame_sha256"], entry["first_frame_sha256"])
-                ep_matches = [m for m in (endpoint_index.get(rev_pair) or []) if m["id_movi"] != vid]
-                if ep_matches:
-                    reverse_img_collisions.append(
-                        {
-                            "source": vid,
-                            "source_split": entry["split"],
-                            "endpoint_reverse_matches": ep_matches,
-                        }
-                    )
+            raw_exact_img_collisions = {k: v for k, v in raw_fwd_index.items() if len(v) > 1}
+            exp_by_digest = excl_manifest["expected_collision_group_by_digest"]
+            raw_groups_exact_match = set(raw_exact_img_collisions.keys()) == set(exp_by_digest.keys())
+            if raw_groups_exact_match:
+                for digest, exp_group in exp_by_digest.items():
+                    obs_members = {(m["id_movi"], m["split"]) for m in raw_exact_img_collisions[digest]}
+                    exp_members = {(m["id_movi"], m["split"]) for m in exp_group["members"]}
+                    if obs_members != exp_members:
+                        raw_groups_exact_match = False
+                        break
+            if not raw_groups_exact_match:
+                failures.append("raw_exact_collisions_deviate_from_exclusion_manifest")
 
-            if exact_img_collisions:
-                failures.append(f"exact_image_trajectory_collisions: {len(exact_img_collisions)}")
-            if reverse_img_collisions:
-                failures.append(f"reverse_or_bothway_collisions: {len(reverse_img_collisions)}")
+            raw_reverse_img_collisions, raw_self_symmetric_ids = _scan_reverse_and_symmetry(
+                raw_fwd_index, raw_endpoint_index, raw_authorized_digests
+            )
+            allowed_raw_reverse_pair = {"16379", "16380"}
+            for col in raw_reverse_img_collisions:
+                peers = col.get("matches") or col.get("endpoint_reverse_matches") or []
+                involved = {col["source"], *(m["id_movi"] for m in peers)}
+                if not involved.issubset(allowed_raw_reverse_pair):
+                    failures.append(f"unexpected_raw_reverse_collision: {sorted(involved)}")
+
+            eff_exact_img_collisions = {k: v for k, v in eff_fwd_index.items() if len(v) > 1}
+            eff_reverse_img_collisions, eff_self_symmetric_ids = _scan_reverse_and_symmetry(
+                eff_fwd_index, eff_endpoint_index, eff_authorized_digests
+            )
+            if eff_exact_img_collisions:
+                failures.append(f"effective_exact_image_trajectory_collisions: {len(eff_exact_img_collisions)}")
+            if eff_reverse_img_collisions:
+                failures.append(f"effective_reverse_or_bothway_collisions: {len(eff_reverse_img_collisions)}")
             if metadata_id_collisions:
                 failures.append(f"normalized_id_collisions: {len(metadata_id_collisions)}")
             if not train_sample_checks:
@@ -633,15 +742,31 @@ def run_historical_abi_preflight(
                 failures.append(f"dev_manifest_verification_failed: {exc}")
                 dev_bundle = None
 
-            train_payload_sha256 = hashlib.sha256("|".join(payload_digests_by_split["train"]).encode("ascii")).hexdigest()
+            raw_train_payload_sha256 = hashlib.sha256("|".join(payload_digests_by_split["train"]).encode("ascii")).hexdigest()
+            effective_train_payload_sha256 = hashlib.sha256("|".join(eff_train_payload_digests).encode("ascii")).hexdigest()
             dev_payload_sha256 = hashlib.sha256("|".join(payload_digests_by_split["dev"]).encode("ascii")).hexdigest()
             counters = reader.audit_counters()
+
+        header_preserved = hdr_summary["header_sha256"] == ORIGINAL_HEADER_SHA256
+        raw_train_preserved = raw_train_payload_sha256 == ORIGINAL_RAW_TRAIN_PAYLOAD_SHA256
+        dev_payload_preserved = dev_payload_sha256 == ORIGINAL_DEV_PAYLOAD_SHA256
+        dev_forward_preserved = dev_bundle is not None and dev_bundle["dev_forward_digests_sha256"] == ORIGINAL_DEV_FORWARD_DIGESTS_SHA256
+        if not header_preserved:
+            failures.append("original_header_sha256_mismatch")
+        if not raw_train_preserved:
+            failures.append("original_raw_train_payload_sha256_mismatch")
+        if not dev_payload_preserved:
+            failures.append("original_dev_payload_sha256_mismatch")
+        if not dev_forward_preserved:
+            failures.append("original_dev_forward_digests_sha256_mismatch")
+        if len(eff_train_payload_digests) != EXPECTED_EFFECTIVE_TRAIN_COUNT:
+            failures.append(f"effective_train_payload_count_mismatch: {len(eff_train_payload_digests)} != {EXPECTED_EFFECTIVE_TRAIN_COUNT}")
 
         if counters["heldout_keys_opened"] != 0 or counters["heldout_payload_bytes_read"] != 0:
             failures.append("heldout_seal_counter_nonzero")
 
         dev_audit = {
-            "verified": dev_bundle is not None,
+            "verified": dev_bundle is not None and dev_forward_preserved,
             "horizons_sha256": HORIZONS_SHA256,
             "expected_videos": EXPECTED_DEV_VIDEOS,
             "expected_pairs": EXPECTED_DEV_PAIRS,
@@ -681,17 +806,42 @@ def run_historical_abi_preflight(
                 "dev_heldout_disjoint": True,
                 "metadata_id_collisions": metadata_id_collisions,
             },
+            "train_exclusion_audit": {
+                "manifest_sha256": excl_manifest["manifest_sha256"],
+                "decision_id": excl_manifest["decision_id"],
+                "option": excl_manifest["option"],
+                "tie_policy": excl_manifest["tie_policy"],
+                "source_fail_receipt_sha256": excl_manifest["source_fail_receipt_sha256"],
+                "excluded_train_count": len(excluded_set),
+                "excluded_train_ids": excl_manifest["excluded_train_ids"],
+                "raw_collision_groups_exact_match": raw_groups_exact_match,
+                "excluded_ids_in_effective_pool": 0,
+            },
             "safetensors_header_audit": hdr_summary,
-            "leakage_audit_train_dev": {
-                "authorized_records_checked": len(authorized_digests),
+            "leakage_audit_raw_train_dev": {
+                "authorized_records_checked": len(raw_authorized_digests),
                 "heldout_records_payload_unchecked_by_policy": manifest["split_counts"]["heldout"],
-                "exact_image_collisions": exact_img_collisions,
-                "reverse_or_bothway_collisions": reverse_img_collisions,
-                "self_symmetric_trajectory_ids": sorted(set(self_symmetric_ids)),
+                "expected_collision_groups_exact_match": raw_groups_exact_match,
+                "exact_image_collisions": raw_exact_img_collisions,
+                "reverse_or_bothway_collisions": raw_reverse_img_collisions,
+                "self_symmetric_trajectory_ids": raw_self_symmetric_ids,
+            },
+            "leakage_audit_effective_train_dev": {
+                "authorized_records_checked": len(eff_authorized_digests),
+                "effective_train_records": len(elig_recs),
+                "frozen_dev_records": manifest["split_counts"]["dev"],
+                "heldout_records_payload_unchecked_by_policy": manifest["split_counts"]["heldout"],
+                "exact_image_collisions": eff_exact_img_collisions,
+                "reverse_or_bothway_collisions": eff_reverse_img_collisions,
+                "self_symmetric_trajectory_ids": eff_self_symmetric_ids,
+                "claim_scope_limitation": "BOUNDED_TO_EXACT_FORWARD_REVERSE_AND_ENDPOINT_IMAGE_EQUALITY_ON_EFFECTIVE_TRAIN387_PLUS_DEV50_HELDOUT_AND_NEAR_DUP_UNTESTED",
             },
             "train_eligibility_and_schedule": {
                 "min_eligible_train_frames": MIN_ELIGIBLE_TRAIN_FRAMES,
-                "total_train_videos": len(train_lengths),
+                "raw_total_train_videos": len(raw_elig) + len(raw_inelig),
+                "raw_train_ids_sha256": raw_train_ids_sha256,
+                "excluded_train_count": len(excluded_set),
+                "excluded_train_ids": excl_manifest["excluded_train_ids"],
                 "eligible_train_count": n_elig,
                 "ineligible_train_count": len(inelig_recs),
                 "ineligible_train_ids": [r["id_movi"] for r in inelig_recs],
@@ -699,8 +849,11 @@ def run_historical_abi_preflight(
                 "length_min": train_lengths_sorted[0],
                 "length_median": median_len,
                 "length_max": train_lengths_sorted[-1],
-                "population_changed_from_400": n_elig != EXPECTED_SPLIT_COUNTS["train"],
+                "population_basis": "OPTION_A_TRAIN_387_AFTER_PINNED_EXCLUSION_MANIFEST",
+                "population_changed_from_387": n_elig != EXPECTED_EFFECTIVE_TRAIN_COUNT,
                 "requires_ds_review_before_pilot_if_changed": True,
+                "epoch_0_remainder_video_ids": ep0_remainder_ids,
+                "epoch_1_remainder_video_ids": ep1_remainder_ids,
                 "schedule_implications_at_batch4_128updates": {
                     "batch_size": PILOT_BATCH_SIZE,
                     "max_updates": PILOT_MAX_UPDATES,
@@ -716,8 +869,16 @@ def run_historical_abi_preflight(
                 "per_split_ids_frames_kind": frame_label_audit,
             },
             "tensor_and_mask_audit": {
-                "train_payload_sha256": train_payload_sha256,
+                "raw_train_payload_sha256": raw_train_payload_sha256,
+                "effective_train_payload_sha256": effective_train_payload_sha256,
+                "effective_train_count_hashed": len(eff_train_payload_digests),
                 "dev_payload_sha256": dev_payload_sha256,
+                "original_identity_checks": {
+                    "header_sha256_preserved": header_preserved,
+                    "raw_train_payload_preserved": raw_train_preserved,
+                    "dev_payload_preserved": dev_payload_preserved,
+                    "dev_forward_digests_preserved": dev_forward_preserved,
+                },
                 "expected_dtypes_converted": "stored_float16_to_cpu_float32_all_finite",
                 "text_mask_audit": zero_mask_summary,
             },
@@ -727,6 +888,7 @@ def run_historical_abi_preflight(
                 "code_commit_sha": rel_info["observed_code_commit_sha"],
                 "code_tree_sha": rel_info["observed_code_tree_sha"],
                 "effective_config_sha256": resolved["effective_config_sha256"],
+                "train_exclusion_manifest_sha256": excl_manifest["manifest_sha256"],
                 "release_ticket_id": rel_info["receipt"]["ticket_id"],
                 "release_sha256": rel_info["release_sha256"],
                 "owner_trust_anchor_sha256": rel_info["trust_anchor_sha256"],

@@ -64,6 +64,46 @@ MAX_SPLIT_FILE_BYTES = 1 * 1024 * 1024
 MAX_MANIFEST_FILE_BYTES = 8 * 1024 * 1024
 MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 MAX_SINGLE_TENSOR_BYTES = 16 * 1024 * 1024
+MAX_EXCLUSION_MANIFEST_BYTES = 1 * 1024 * 1024
+
+TRAIN_EXCLUSION_MANIFEST_SCHEMA = "stage-a-historical-train-exclusion-manifest-v1"
+TRAIN_EXCLUSION_DECISION_ID = "STC_STAGE_A_STAGE1_LEAKAGE_DS_DECISION_TRAIN387_20261125"
+TRAIN_EXCLUSION_OPTION = "OPTION_A_TRAIN_387_DEV_FROZEN"
+TRAIN_EXCLUSION_TIE_POLICY = "DEV_COUNTERPART_EXCLUDED_FROM_TRAIN__WITHIN_TRAIN_RETAIN_LOWER_NUMERIC_ID"
+SOURCE_FAIL_RECEIPT_SHA256 = "1d0dec67bd923bf98802a0ce3972acabc4de9cab8ca9e315da56965d314e106e"
+ORIGINAL_HEADER_SHA256 = "df19ad7593d1de13ea02273c24738f19efb770f7b33b66161b1c042b282c4584"
+ORIGINAL_RAW_TRAIN_PAYLOAD_SHA256 = "1bec229169f0161f88eee9fa1b8d726fbb597723a22704c6b805c40c7e8731f2"
+ORIGINAL_DEV_PAYLOAD_SHA256 = "4e00af60d316dbf726308a77594e5d33cadad647ed90b5e6249591c6a3ecad80"
+ORIGINAL_DEV_FORWARD_DIGESTS_SHA256 = "b80f0142f0b429aaca7ce033140cb558f6696a6a4d1534dba133e85494807147"
+EXPECTED_RAW_TRAIN_IDS_SHA256 = "5ac9b4de284a9869ce8ca70255682580f7819270cd57d015c07d7d07dee9b551"
+EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256 = "3d7f4bb67c0a274f023ae71f682e422aad875e20d8f391645135affc8265f45f"
+EXPECTED_EXCLUDED_TRAIN_COUNT = 13
+EXPECTED_EFFECTIVE_TRAIN_COUNT = 387
+EXPECTED_EXCLUDED_TRAIN_IDS = frozenset(
+    {
+        "811",
+        "1463",
+        "2795",
+        "3984",
+        "8899",
+        "9105",
+        "16232",
+        "16380",
+        "17647",
+        "18169",
+        "18184",
+        "19165",
+        "41038",
+    }
+)
+TRAIN_EXCLUSION_MANIFEST_SHA256 = "1105b57e03bf345489cef7723e0e214496414ce6e535a55b8ed7c53897e71683"
+EXPECTED_COLLISION_REASONS = frozenset(
+    {
+        "DEV_TRAIN_EXACT_IMAGE_LEAKAGE",
+        "DEV_TRAIN_EXACT_AND_REVERSE_IMAGE_LEAKAGE",
+        "WITHIN_TRAIN_EXACT_IMAGE_DUPLICATE",
+    }
+)
 
 
 def _read_bounded_bytes(path: Path, *, max_bytes: int, label: str) -> bytes:
@@ -236,6 +276,180 @@ def load_verified_portable_manifest(manifest_path: Path | str, splits: dict) -> 
     }
 
 
+def _read_exact(handle, nbytes: int, label: str) -> bytes:
+    if nbytes < 0:
+        raise ValueError(f"{label}: negative read length {nbytes}")
+    buf = bytearray()
+    while len(buf) < nbytes:
+        chunk = handle.read(nbytes - len(buf))
+        if not chunk:
+            raise ValueError(f"short read for {label}: {len(buf)} != {nbytes}")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def load_verified_train_exclusion_manifest(manifest_path: Path | str, splits: dict) -> dict:
+    """Load and pin-verify Option A TRAIN387 exclusion manifest without reading any tensor payloads."""
+    path = Path(manifest_path)
+    raw = _read_bounded_bytes(path, max_bytes=MAX_EXCLUSION_MANIFEST_BYTES, label="train_exclusion_manifest")
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    if manifest_sha256 != TRAIN_EXCLUSION_MANIFEST_SHA256:
+        raise ValueError("train_exclusion_manifest sha256 disagrees with pinned TRAIN_EXCLUSION_MANIFEST_SHA256")
+
+    doc = strict_json_loads(raw, max_bytes=MAX_EXCLUSION_MANIFEST_BYTES)
+    expected_keys = {
+        "schema",
+        "decision_id",
+        "option",
+        "source_fail_receipt_sha256",
+        "source_code_commit_sha",
+        "original_corpus_manifest_sha256",
+        "original_shard_attested_sha256",
+        "original_header_sha256",
+        "original_raw_train_payload_sha256",
+        "original_dev_payload_sha256",
+        "original_dev_forward_digests_sha256",
+        "original_split_digests",
+        "tie_policy",
+        "raw_split_counts",
+        "expected_excluded_train_count",
+        "expected_effective_train_count",
+        "expected_effective_dev_count",
+        "expected_sealed_heldout_count",
+        "expected_raw_train_ids_sha256",
+        "expected_effective_train_ids_sha256",
+        "excluded_train_ids",
+        "collision_groups",
+    }
+    if type(doc) is not dict or set(doc.keys()) != expected_keys:
+        raise ValueError("train_exclusion_manifest keys do not match pinned schema")
+
+    if doc["schema"] != TRAIN_EXCLUSION_MANIFEST_SCHEMA:
+        raise ValueError("train_exclusion_manifest schema mismatch")
+    if doc["decision_id"] != TRAIN_EXCLUSION_DECISION_ID or doc["option"] != TRAIN_EXCLUSION_OPTION:
+        raise ValueError("train_exclusion_manifest decision_id or option mismatch")
+    if doc["tie_policy"] != TRAIN_EXCLUSION_TIE_POLICY:
+        raise ValueError("train_exclusion_manifest tie_policy mismatch")
+    if doc["source_fail_receipt_sha256"] != SOURCE_FAIL_RECEIPT_SHA256:
+        raise ValueError("train_exclusion_manifest source_fail_receipt_sha256 mismatch")
+    src_commit = _require_nonempty_str(doc["source_code_commit_sha"], "source_code_commit_sha", max_len=40)
+    if len(src_commit) != 40 or any(ch not in HEX_CHARS for ch in src_commit):
+        raise ValueError("train_exclusion_manifest source_code_commit_sha must be 40-char hex")
+    if doc["original_corpus_manifest_sha256"] != PORTABLE_MANIFEST_SHA256:
+        raise ValueError("train_exclusion_manifest original_corpus_manifest_sha256 mismatch")
+    if doc["original_shard_attested_sha256"] != PORTABLE_SHARD_ATTESTED_SHA256:
+        raise ValueError("train_exclusion_manifest original_shard_attested_sha256 mismatch")
+    if doc["original_header_sha256"] != ORIGINAL_HEADER_SHA256:
+        raise ValueError("train_exclusion_manifest original_header_sha256 mismatch")
+    if doc["original_raw_train_payload_sha256"] != ORIGINAL_RAW_TRAIN_PAYLOAD_SHA256:
+        raise ValueError("train_exclusion_manifest original_raw_train_payload_sha256 mismatch")
+    if doc["original_dev_payload_sha256"] != ORIGINAL_DEV_PAYLOAD_SHA256:
+        raise ValueError("train_exclusion_manifest original_dev_payload_sha256 mismatch")
+    if doc["original_dev_forward_digests_sha256"] != ORIGINAL_DEV_FORWARD_DIGESTS_SHA256:
+        raise ValueError("train_exclusion_manifest original_dev_forward_digests_sha256 mismatch")
+    if doc["original_split_digests"] != splits["digests"]:
+        raise ValueError("train_exclusion_manifest original_split_digests mismatch")
+    if doc["raw_split_counts"] != EXPECTED_SPLIT_COUNTS:
+        raise ValueError("train_exclusion_manifest raw_split_counts mismatch")
+
+    require_exact_int(doc["expected_excluded_train_count"], "expected_excluded_train_count", minimum=EXPECTED_EXCLUDED_TRAIN_COUNT, maximum=EXPECTED_EXCLUDED_TRAIN_COUNT)
+    require_exact_int(doc["expected_effective_train_count"], "expected_effective_train_count", minimum=EXPECTED_EFFECTIVE_TRAIN_COUNT, maximum=EXPECTED_EFFECTIVE_TRAIN_COUNT)
+    require_exact_int(doc["expected_effective_dev_count"], "expected_effective_dev_count", minimum=EXPECTED_SPLIT_COUNTS["dev"], maximum=EXPECTED_SPLIT_COUNTS["dev"])
+    require_exact_int(doc["expected_sealed_heldout_count"], "expected_sealed_heldout_count", minimum=EXPECTED_SPLIT_COUNTS["heldout"], maximum=EXPECTED_SPLIT_COUNTS["heldout"])
+    if doc["expected_raw_train_ids_sha256"] != EXPECTED_RAW_TRAIN_IDS_SHA256:
+        raise ValueError("train_exclusion_manifest expected_raw_train_ids_sha256 mismatch")
+    if doc["expected_effective_train_ids_sha256"] != EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256:
+        raise ValueError("train_exclusion_manifest expected_effective_train_ids_sha256 mismatch")
+
+    raw_excl = doc["excluded_train_ids"]
+    if type(raw_excl) is not list or len(raw_excl) != EXPECTED_EXCLUDED_TRAIN_COUNT:
+        raise ValueError("train_exclusion_manifest excluded_train_ids must contain exact 13 entries")
+    cleaned_excl = [_require_nonempty_str(v, "excluded_train_id", max_len=64) for v in raw_excl]
+    if cleaned_excl != sorted(set(cleaned_excl)):
+        raise ValueError("train_exclusion_manifest excluded_train_ids must be strictly sorted unique")
+    excl_set = frozenset(cleaned_excl)
+    if excl_set != EXPECTED_EXCLUDED_TRAIN_IDS:
+        raise ValueError("train_exclusion_manifest excluded_train_ids set disagrees with DS Option A 13 exclusions")
+    if not excl_set.issubset(splits["train_set"]) or not excl_set.isdisjoint(splits["dev_set"]) or not excl_set.isdisjoint(splits["heldout_set"]):
+        raise ValueError("excluded_train_ids must belong exclusively to raw train split")
+
+    groups = doc["collision_groups"]
+    if type(groups) is not list or len(groups) != EXPECTED_EXCLUDED_TRAIN_COUNT:
+        raise ValueError("train_exclusion_manifest collision_groups must contain exact 13 groups")
+    seen_group_ids: set[str] = set()
+    group_excluded_ids: set[str] = set()
+    expected_by_digest: dict[str, dict] = {}
+    group_keys = {"group_id", "fwd_img_f32_sha256", "reason", "retained_id", "retained_split", "excluded_id", "excluded_split", "members"}
+    for idx, g in enumerate(groups):
+        if type(g) is not dict or set(g.keys()) != group_keys:
+            raise ValueError(f"collision_groups[{idx}] schema keys mismatch")
+        gid = _require_nonempty_str(g["group_id"], f"collision_groups[{idx}].group_id", max_len=32)
+        if gid in seen_group_ids:
+            raise ValueError(f"duplicate collision group_id: {gid}")
+        seen_group_ids.add(gid)
+        digest = _require_sha256_hex(g["fwd_img_f32_sha256"], f"{gid}.fwd_img_f32_sha256")
+        if digest in expected_by_digest:
+            raise ValueError(f"duplicate fwd_img_f32_sha256 in collision_groups: {digest}")
+        reason = _require_nonempty_str(g["reason"], f"{gid}.reason", max_len=64)
+        if reason not in EXPECTED_COLLISION_REASONS:
+            raise ValueError(f"invalid collision reason for {gid}: {reason}")
+        if g["excluded_split"] != "train" or g["retained_split"] not in ("train", "dev"):
+            raise ValueError(f"invalid split role in collision group {gid}")
+        ret_id = _require_nonempty_str(g["retained_id"], f"{gid}.retained_id", max_len=64)
+        exc_id = _require_nonempty_str(g["excluded_id"], f"{gid}.excluded_id", max_len=64)
+        if ret_id == exc_id:
+            raise ValueError(f"self-exclusion invalid in collision group {gid}")
+        if exc_id not in splits["train_set"] or ret_id not in splits[f"{g['retained_split']}_set"]:
+            raise ValueError(f"collision group {gid} IDs do not match declared split sets")
+        if g["retained_split"] == "dev":
+            if "DEV_TRAIN" not in reason:
+                raise ValueError(f"DEV/TRAIN collision group {gid} invalid reason")
+        else:
+            if reason != "WITHIN_TRAIN_EXACT_IMAGE_DUPLICATE":
+                raise ValueError(f"within-TRAIN collision group {gid} invalid reason")
+            if not (ret_id.isdigit() and exc_id.isdigit() and int(ret_id) < int(exc_id)):
+                raise ValueError(f"within-TRAIN collision group {gid} violates retain-lower-numeric-ID tie policy")
+        members = g["members"]
+        if type(members) is not list or len(members) != 2:
+            raise ValueError(f"collision group {gid} members must contain exact 2 entries")
+        observed_pairs: set[tuple[str, str]] = set()
+        for m in members:
+            if type(m) is not dict or set(m.keys()) != {"id_movi", "split"}:
+                raise ValueError(f"collision group {gid} member entry malformed")
+            observed_pairs.add((_require_nonempty_str(m["id_movi"], "m.id_movi", max_len=64), _require_nonempty_str(m["split"], "m.split", max_len=16)))
+        expected_pairs = {(ret_id, g["retained_split"]), (exc_id, "train")}
+        if observed_pairs != expected_pairs:
+            raise ValueError(f"collision group {gid} members disagree with retained/excluded pair")
+        group_excluded_ids.add(exc_id)
+        expected_by_digest[digest] = dict(g)
+
+    if group_excluded_ids != excl_set:
+        raise ValueError("collision_groups excluded IDs disagree with excluded_train_ids")
+
+    eff_sorted = sorted(splits["train_set"] - excl_set)
+    if len(eff_sorted) != EXPECTED_EFFECTIVE_TRAIN_COUNT:
+        raise ValueError("effective train ID count != 387")
+    eff_sha = hashlib.sha256(canonical_json_bytes(eff_sorted, max_bytes=1_048_576)).hexdigest()
+    if eff_sha != EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256:
+        raise ValueError("recomputed effective TRAIN387 IDs SHA-256 disagrees with DS Option A pin")
+
+    return {
+        "manifest_sha256": manifest_sha256,
+        "decision_id": doc["decision_id"],
+        "option": doc["option"],
+        "tie_policy": doc["tie_policy"],
+        "source_fail_receipt_sha256": doc["source_fail_receipt_sha256"],
+        "excluded_train_ids": cleaned_excl,
+        "excluded_train_set": excl_set,
+        "expected_excluded_train_count": EXPECTED_EXCLUDED_TRAIN_COUNT,
+        "expected_effective_train_count": EXPECTED_EFFECTIVE_TRAIN_COUNT,
+        "expected_raw_train_ids_sha256": EXPECTED_RAW_TRAIN_IDS_SHA256,
+        "expected_effective_train_ids_sha256": EXPECTED_EFFECTIVE_TRAIN_IDS_SHA256,
+        "collision_groups": [dict(g) for g in groups],
+        "expected_collision_group_by_digest": expected_by_digest,
+    }
+
+
 def _expected_tensor_shape(suffix: str, n_frames: int) -> tuple[int, ...]:
     if suffix == "img":
         return (n_frames, 1, WIDTH)
@@ -247,11 +461,12 @@ def _expected_tensor_shape(suffix: str, n_frames: int) -> tuple[int, ...]:
 
 
 class SelectiveSafetensorsReader:
-    """Header-only plain-file safetensors reader with strict non-overlapping held-out byte seal.
+    """Header-only plain-file safetensors reader with strict held-out and excluded-ID byte isolation.
 
     Never uses mmap, torch.load, or pickle. Reads ONLY the 8-byte header length + bounded JSON
-    header at open(), proves disjoint tensor intervals across all 2,000 tensors, and refuses any
-    held-out split selection or byte-range overlap prior to seeking or reading tensor payloads.
+    header at open() (defaulting to Python unbuffered raw FileIO buffering=0 while explicitly NOT
+    claiming OS page-cache bypass), proves disjoint tensor intervals across all 2,000 tensors, and
+    refuses any held-out split, excluded video ID, or byte-range overlap prior to seeking or reading.
     """
 
     def __init__(
@@ -260,12 +475,23 @@ class SelectiveSafetensorsReader:
         manifest: dict,
         *,
         allowed_splits: frozenset[str] | set[str],
+        excluded_video_ids: frozenset[str] | set[str] = frozenset(),
+        unbuffered: bool = True,
     ) -> None:
         splits_frozen = frozenset(allowed_splits)
         if not splits_frozen:
             raise ValueError("allowed_splits must be non-empty")
         if "heldout" in splits_frozen or not splits_frozen.issubset(ALLOWED_READER_SPLITS):
             raise PermissionError(f"forbidden split in allowed_splits (held-out is sealed): {sorted(splits_frozen)}")
+        if type(unbuffered) is not bool:
+            raise ValueError("unbuffered must be exact bool")
+
+        excl_frozen = frozenset(excluded_video_ids)
+        by_id = manifest["record_by_id"]
+        for vid in excl_frozen:
+            rec = by_id.get(vid)
+            if rec is None or rec["split"] != "train":
+                raise ValueError(f"excluded_video_ids entry {vid!r} is missing or not in train split")
 
         self._shard_path = Path(shard_path)
         if not self._shard_path.is_file():
@@ -277,21 +503,19 @@ class SelectiveSafetensorsReader:
             raise ValueError("safetensors file truncated before header")
 
         self._allowed_splits = splits_frozen
-        self._handle = open(self._shard_path, "rb")
+        self._excluded_video_ids = excl_frozen
+        self._unbuffered = unbuffered
+        self._handle = open(self._shard_path, "rb", buffering=0 if unbuffered else -1)
         self._closed = False
         try:
-            len_bytes = self._handle.read(8)
-            if len(len_bytes) != 8:
-                raise ValueError("failed to read 8-byte safetensors header length")
+            len_bytes = _read_exact(self._handle, 8, "safetensors header length")
             header_len = int.from_bytes(len_bytes, "little")
             if header_len < 2 or header_len > MAX_SAFETENSORS_HEADER_BYTES:
                 raise ValueError(f"safetensors header length out of bounds: {header_len}")
             data_start = 8 + header_len
             if data_start > self._file_size:
                 raise ValueError("safetensors header exceeds file size")
-            header_bytes = self._handle.read(header_len)
-            if len(header_bytes) != header_len:
-                raise ValueError("truncated safetensors header")
+            header_bytes = _read_exact(self._handle, header_len, "safetensors header JSON")
             self._header_sha256 = hashlib.sha256(header_bytes).hexdigest()
             self._data_start = data_start
 
@@ -315,7 +539,9 @@ class SelectiveSafetensorsReader:
             tensor_meta: dict[str, dict] = {}
             allowed_keys: set[str] = set()
             forbidden_keys: set[str] = set()
+            excluded_keys: set[str] = set()
             heldout_abs_ranges: list[tuple[int, int]] = []
+            excluded_abs_ranges: list[tuple[int, int]] = []
 
             for tkey in sorted(header_tensor_keys):
                 entry = header_doc[tkey]
@@ -349,8 +575,11 @@ class SelectiveSafetensorsReader:
 
                 intervals.append((rel_start, rel_end, tkey))
                 split = rec["split"]
+                is_excluded_train = rec["id_movi"] in excl_frozen
                 tensor_meta[tkey] = {
+                    "id_movi": rec["id_movi"],
                     "split": split,
+                    "excluded": is_excluded_train,
                     "dtype": "F16",
                     "shape": shape,
                     "rel_start": rel_start,
@@ -359,12 +588,15 @@ class SelectiveSafetensorsReader:
                     "abs_end": abs_end,
                     "nbytes": expected_nbytes,
                 }
-                if split in splits_frozen:
+                if split in splits_frozen and not is_excluded_train:
                     allowed_keys.add(tkey)
                 else:
                     forbidden_keys.add(tkey)
                     if split == "heldout":
                         heldout_abs_ranges.append((abs_start, abs_end))
+                    if is_excluded_train:
+                        excluded_keys.add(tkey)
+                        excluded_abs_ranges.append((abs_start, abs_end))
 
             intervals.sort(key=lambda item: (item[0], item[1]))
             prev_end = 0
@@ -378,10 +610,14 @@ class SelectiveSafetensorsReader:
             self._tensor_meta = tensor_meta
             self._allowed_keys = frozenset(allowed_keys)
             self._forbidden_keys = frozenset(forbidden_keys)
+            self._excluded_keys = frozenset(excluded_keys)
             self._heldout_abs_ranges = tuple(sorted(heldout_abs_ranges))
+            self._excluded_abs_ranges = tuple(sorted(excluded_abs_ranges))
             self._opened_keys_by_split: dict[str, set[str]] = {"train": set(), "dev": set(), "heldout": set()}
             self._bytes_read_by_split: dict[str, int] = {"train": 0, "dev": 0, "heldout": 0}
             self._read_ops_by_split: dict[str, int] = {"train": 0, "dev": 0, "heldout": 0}
+            self._opened_excluded_keys: set[str] = set()
+            self._excluded_bytes_read = 0
         except Exception:
             self.close()
             raise
@@ -420,15 +656,20 @@ class SelectiveSafetensorsReader:
             "tensor_keys_by_split": counts,
             "payload_bytes_by_split": bytes_by_split,
             "heldout_intervals_sealed": len(self._heldout_abs_ranges),
+            "excluded_intervals_sealed": len(self._excluded_abs_ranges),
             "all_intervals_disjoint": True,
         }
 
     def read_raw_bytes(self, key: str) -> bytes:
         if self._closed:
             raise ValueError("SelectiveSafetensorsReader is closed")
+        if key in self._excluded_keys:
+            raise PermissionError(f"excluded train video tensor key rejected: {key}")
         if key in self._forbidden_keys or key not in self._allowed_keys:
             raise PermissionError(f"forbidden tensor key read rejected under split seal: {key}")
         meta = self._tensor_meta[key]
+        if meta["excluded"] or meta["id_movi"] in self._excluded_video_ids:
+            raise PermissionError(f"excluded train video key rejected: {key}")
         if meta["split"] == "heldout" or meta["split"] not in self._allowed_splits:
             raise PermissionError(f"held-out or unauthorized split key rejected: {key}")
 
@@ -438,11 +679,12 @@ class SelectiveSafetensorsReader:
         for h_start, h_end in self._heldout_abs_ranges:
             if abs_start < h_end and h_start < abs_end:
                 raise PermissionError(f"byte range for {key} overlaps sealed held-out interval")
+        for e_start, e_end in self._excluded_abs_ranges:
+            if abs_start < e_end and e_start < abs_end:
+                raise PermissionError(f"byte range for {key} overlaps sealed excluded interval")
 
         self._handle.seek(abs_start, os.SEEK_SET)
-        raw = self._handle.read(nbytes)
-        if len(raw) != nbytes:
-            raise ValueError(f"short read for tensor {key}: {len(raw)} != {nbytes}")
+        raw = _read_exact(self._handle, nbytes, f"tensor {key}")
 
         sp = meta["split"]
         self._opened_keys_by_split[sp].add(key)
@@ -472,6 +714,8 @@ class SelectiveSafetensorsReader:
         return self.decode_f32_from_raw(key, raw)
 
     def read_video_tensors(self, rec: dict) -> tuple:
+        if rec["id_movi"] in self._excluded_video_ids:
+            raise PermissionError(f"refusing to read tensors for excluded train video {rec['id_movi']}")
         if rec["split"] == "heldout" or rec["split"] not in self._allowed_splits:
             raise PermissionError(f"refusing to read tensors for unauthorized split {rec['split']}")
         key_prefix = rec["key"]
@@ -498,8 +742,17 @@ class SelectiveSafetensorsReader:
     def audit_counters(self) -> dict:
         return {
             "allowed_splits": sorted(self._allowed_splits),
+            "unbuffered_io": self._unbuffered,
+            "file_io_mode": (
+                "python_unbuffered_raw_io_no_mmap_os_page_cache_not_bypassed"
+                if self._unbuffered
+                else "python_buffered_io_no_mmap_os_page_cache_not_bypassed"
+            ),
             "heldout_keys_opened": len(self._opened_keys_by_split["heldout"]),
             "heldout_payload_bytes_read": int(self._bytes_read_by_split["heldout"]),
+            "excluded_video_ids_blocked": len(self._excluded_video_ids),
+            "excluded_keys_opened": len(self._opened_excluded_keys),
+            "excluded_payload_bytes_read": int(self._excluded_bytes_read),
             "full_shard_rehashed": False,
             "full_shard_hash_source": "ATTESTED_PHASE1A_MANIFEST_AND_RECEIPT_ONLY_TO_AVOID_READING_HELDOUT_BYTES",
             "header_sha256": self._header_sha256,
@@ -676,17 +929,50 @@ def assert_historical_no_target_leak(
     }
 
 
-def eligible_train_records(manifest: dict, *, min_frames: int = MIN_ELIGIBLE_TRAIN_FRAMES) -> tuple[list[dict], list[dict], str]:
-    """Partition 400 train records into length >= min_frames eligible pool vs < min_frames ineligible without silent alteration."""
+def eligible_train_records(
+    manifest: dict,
+    *,
+    min_frames: int = MIN_ELIGIBLE_TRAIN_FRAMES,
+    excluded_train_ids: frozenset[str] | set[str] = frozenset(),
+) -> tuple[list[dict], list[dict], str]:
+    """Partition 400 raw train records by pinned exclusion manifest and min_frames without silent alteration."""
     min_req = require_exact_int(min_frames, "min_frames", minimum=2, maximum=1000)
-    train_recs = sorted((r for r in manifest["records"] if r["split"] == "train"), key=lambda r: r["id_movi"])
-    eligible = [r for r in train_recs if len(r["ids_frames"]) >= min_req]
-    ineligible = [r for r in train_recs if len(r["ids_frames"]) < min_req]
-    if len(train_recs) != EXPECTED_SPLIT_COUNTS["train"]:
+    raw_train_recs = sorted((r for r in manifest["records"] if r["split"] == "train"), key=lambda r: r["id_movi"])
+    if len(raw_train_recs) != EXPECTED_SPLIT_COUNTS["train"]:
         raise ValueError("train split count in manifest is not 400")
+    excl_set = frozenset(excluded_train_ids)
+    raw_ids = {r["id_movi"] for r in raw_train_recs}
+    unknown_excl = sorted(excl_set - raw_ids)
+    if unknown_excl:
+        raise ValueError(f"excluded_train_ids contains unknown or non-train IDs: {unknown_excl}")
+
+    retained_recs = [r for r in raw_train_recs if r["id_movi"] not in excl_set]
+    eligible = [r for r in retained_recs if len(r["ids_frames"]) >= min_req]
+    ineligible = [r for r in retained_recs if len(r["ids_frames"]) < min_req]
+    if not excl_set.isdisjoint({r["id_movi"] for r in eligible}):
+        raise RuntimeError("excluded train ID leaked into eligible pool")
     eligible_ids = [r["id_movi"] for r in eligible]
     eligible_ids_sha256 = hashlib.sha256(canonical_json_bytes(eligible_ids, max_bytes=1_048_576)).hexdigest()
     return eligible, ineligible, eligible_ids_sha256
+
+
+def epoch_remainder_video_ids(
+    eligible_records: list[dict],
+    *,
+    seed: int,
+    epoch: int,
+    batch_size: int,
+) -> list[str]:
+    """Return exact retained video IDs skipped at the rollover_before_overflow tail of an epoch."""
+    n_elig = len(eligible_records)
+    if n_elig < 1:
+        raise ValueError("eligible_records cannot be empty")
+    batch_val = require_exact_int(batch_size, "batch_size", minimum=1, maximum=n_elig)
+    seed_val = require_exact_int(seed, "seed", minimum=0)
+    epoch_val = require_exact_int(epoch, "epoch", minimum=0)
+    rem = n_elig % batch_val
+    start = n_elig - rem
+    return [eligible_records[(seed_val + epoch_val + off) % n_elig]["id_movi"] for off in range(start, n_elig)]
 
 
 def advance_historical_window(
@@ -720,6 +1006,7 @@ def next_historical_train_batch(
     cursor_before: int,
     batch_size: int,
     tensor_cache: dict[str, tuple] | None = None,
+    forbidden_video_ids: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[dict], int, list[str]]:
     """Assemble one authorized historical train batch using pinned stage_a_sampler_v2 semantics."""
     sampler_digest = verify_sampler_pin()
@@ -734,14 +1021,15 @@ def next_historical_train_batch(
         raise ValueError("cursor window exceeds eligible train pool size")
     seed_val = require_exact_int(seed, "seed", minimum=0)
     epoch_val = require_exact_int(epoch, "epoch", minimum=0)
+    forbidden_set = frozenset(forbidden_video_ids)
 
     selected_recs = [eligible_records[(seed_val + epoch_val + before_val + off) % n_elig] for off in range(batch_val)]
     items: list[dict] = []
     chosen_ids: list[str] = []
     for rec in selected_recs:
         vid = rec["id_movi"]
-        if rec["split"] != "train":
-            raise PermissionError(f"non-train record requested in train batch: {vid} ({rec['split']})")
+        if vid in forbidden_set or rec["split"] != "train":
+            raise PermissionError(f"forbidden or excluded record requested in train batch: {vid} ({rec['split']})")
         frames = rec["ids_frames"]
         ordinals, history = sample(frames, vid, epoch_val, seed_val)
         cur_ord, tgt_ord = int(ordinals[-2]), int(ordinals[-1])
